@@ -1,9 +1,10 @@
-#include <mpi.h>
 #include <ctype.h>
 #include <math.h>
+#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 // 6144 bytes should be able to capture the largest of solvable boards like 26x26.
 // Being unable to read line by line is hard if have to read multiple times and take care of cases
@@ -26,6 +27,7 @@
 #define MAX(a, b) (a>b? a: b)
 #define MIN(a, b) (a<b? a: b)
 
+unsigned long long elapsedTime(struct timeval, struct timeval);
 int initBoard(char*, char*);
 void deinitBoard();
 void printBoard(int brd[const]);
@@ -40,6 +42,7 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
 
  int main(int argc, char **argv) {
  	int res;
+ 	struct timeval starttime, endtime;
 
  	// Make sure the input files are given
  	if(argc<3){
@@ -54,7 +57,10 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
  	if(pid==MASTER_PID) {
+		gettimeofday(&starttime, NULL);
  		res = initBoard(argv[1], argv[2]);	// Initialize board
+ 		gettimeofday(&endtime, NULL);
+ 		printf("Time taken to load input: %lf ms\n", elapsedTime(starttime, endtime));
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
  		if(res) printf("initBoard failed. Exiting master %d\n", pid);
  		else {
@@ -74,7 +80,15 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	return 0;
  }
 
- int initBoard(char *boardfile, char *paramfile) {
+// Returns elpased time in millseconds
+unsigned long long elapsedTime(struct timeval start, struct timeval end) {
+	if(end.tv_usec<start.tv_usec) {
+		end.tv_sec-=1; end.tv_usec+=1000;
+	}
+	return (end.tv_sec-start.tv_sec)*1000000.0+end.tv_usec-start.tv_usec;
+}
+
+int initBoard(char *boardfile, char *paramfile) {
  	char buf[INPUT_BUF_LEN], *ptok, *cur, *start; int len, r, c, err;
  	MPI_File brdfp, paramsfp;
  	MPI_Status status;
@@ -171,17 +185,17 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	MPI_File_close(&paramsfp);	// Done with params file. Close it.
 
  	return 0;
- }
+}
 
- void deinitBoard() {
+void deinitBoard() {
  	if(board!=NULL) free(board);
  	board = NULL;
- }
+}
 
- void printBoard(int brd[const]) {
+void printBoard(int brd[const]) {
  	int r;
  	printf("Board:\n");
  	for(r=0; r<R; r++) printf("%d\n", brd[BOARD(r)]&brd[TAKEN(r)]);
  	printf("Board occupancy\n");
  	for(r=0; r<R; r++) printf("%d\n", brd[TAKEN(r)]);
- }
+}
