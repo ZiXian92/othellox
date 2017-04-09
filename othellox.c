@@ -25,6 +25,7 @@
 #define MIN(a, b) (a<b? a: b)
 
 int initBoard(char*, char*);
+void deinitBoard();
 void printBoard(int brd[const]);
 
 int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, *board;
@@ -53,7 +54,6 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
  	if(pid==MASTER_PID) {
- 		printf("Hello from master\n");
  		res = initBoard(argv[1], argv[2]);	// Initialize board
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
  		if(res) {
@@ -61,10 +61,9 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  		} else {
  			printf("Successfully initBoard. Resuming master %d\n", pid);
  		}
- 		printBoard(board);
+ 		// printBoard(board);
+ 		deinitBoard();
  	} else {	// Slave just run original minimax with alpha-beta pruning.
- 		printf("Hello from slave\n");
-
  		// Wait for initialization result of master
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
  		if(res) {
@@ -82,13 +81,13 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	MPI_File brdfp, paramsfp;
  	MPI_Status status;
 
- 	printf("Opening board file %s\n", boardfile);
-
+ 	// Open board file
  	if(err = MPI_File_open(MPI_COMM_SELF, boardfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &brdfp)) {
  		printf("Unable to open board file\n");
  		return -1;
  	}
 
+ 	// Read in board file content
  	memset(buf, 0, INPUT_BUF_LEN*sizeof(char));
  	if(err = MPI_File_read(brdfp, buf, INPUT_BUF_LEN, MPI_CHAR, &status)) {
  		printf("Failed to read board file data\n");
@@ -96,10 +95,8 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  		return -1;
  	}
 
- 	printf("Content: %s\n", buf);
-
  	// Read numColumns and numRows
- 	start = buf+6; cur = strchr(start, '\n');	// 1st line is Size: 
+ 	start = buf+6; cur = strchr(start, '\n');	// 1st line is Size: C,R
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;	// Erase non-alnum characters
  	ptok = strtok(start, ",");
  	while(ptok!=NULL) {
@@ -107,11 +104,10 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
 		else if(R==-1) R = atoi(ptok);
 		else break;
 	}
-	printf("R, C: %d, %d\n", R, C);
 	board = malloc(R*2*sizeof(int)); memset(board, 0, R*2*sizeof(int));
 
 	// Read white positions
-	start = cur+10; cur = strchr(start, '\n'); // 2nd line format is White: { 
+	start = cur+10; cur = strchr(start, '\n'); // 2nd line format is White: { <moves>,... }
 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;	// Erase trailing non-alnum in line
 	ptok = strtok(start, ",");
 	while(ptok!=NULL) {
@@ -120,7 +116,7 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
 	}
 
 	// Read black positions
-	start = cur+10; cur = strchr(start, '\n'); // 2nd line format is Black: { 
+	start = cur+10; cur = strchr(start, '\n'); // 2nd line format is Black: { <moves>,... }
 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;	// Erase trailing non-alnum in line
 	ptok = strtok(start, ",");
 	while(ptok!=NULL) {
@@ -131,12 +127,12 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	MPI_File_close(&brdfp);	// Done with board file. Close it.
 
  	// Open params file for reading
- 	printf("Opening file %s\n", paramfile);
  	if(err = MPI_File_open(MPI_COMM_SELF, paramfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &paramsfp)) {
  		printf("Unable to open params file\n");
  		return -1;
  	}
 
+ 	// Read in the file content
  	memset(buf, 0, INPUT_BUF_LEN*sizeof(char));
  	if(err = MPI_File_read(paramsfp, buf, INPUT_BUF_LEN, MPI_CHAR, &status)) {
  		printf("Failed to read params file\n");
@@ -144,38 +140,40 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  		return -1;
  	}
 
- 	printf("Params contents: %s\n", buf);
+ 	// Read max depth
+ 	start = buf+10; cur = strchr(start, '\n');	// 1st line is MaxDepth: <maxdepth>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	MAXDEPTH = atoi(start);
+
+ 	// Read max boards
+ 	start = cur+12; cur = strchr(start, '\n');	// 2nd line is MaxBoards: <maxboards>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	MAXBOARDS = atoi(start);
+
+ 	// Read corner value
+ 	start = cur+14; cur = strchr(start, '\n');	// 3rd line is CornerValue: <cornervalue>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	CORNERVALUE = atoi(start);
+
+ 	// Read edge value
+ 	start = cur+12; cur = strchr(start, '\n');	// 4th line is EdgeValue: <edgevalue>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	EDGEVALUE = atoi(start);
 
  	MPI_File_close(&paramsfp);	// Done with params file. Close it.
 
  	return 0;
+ }
 
-	// // Read max depth
-	// fgets(buf, INPUT_BUF_LEN, paramsfp); len = strlen(buf)-1;
-	// while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
-	// MAXDEPTH = atoi(buf+10);
-
-	// // Read max boards
-	// fgets(buf, INPUT_BUF_LEN, paramsfp); len = strlen(buf)-1;
-	// while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
-	// MAXBOARDS = atoi(buf+11);
-
-	// // Read corner value
-	// fgets(buf, INPUT_BUF_LEN, paramsfp); len = strlen(buf)-1;
-	// while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
-	// CORNERVALUE = atoi(buf+13);
-
-	// // Read edge value
-	// fgets(buf, INPUT_BUF_LEN, paramsfp); len = strlen(buf)-1;
-	// while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
-	// EDGEVALUE = atoi(buf+11);
-	// fclose(paramsfp);
-
-	// printf("Finished board initialization\n");
+ void deinitBoard() {
+ 	if(board!=NULL) free(board);
+ 	board = NULL;
  }
 
  void printBoard(int brd[const]) {
  	int r;
  	printf("Board:\n");
  	for(r=0; r<R; r++) printf("%d\n", brd[BOARD(r)]&brd[TAKEN(r)]);
+ 	printf("Board occupancy\n");
+ 	for(r=0; r<R; r++) printf("%d\n", brd[TAKEN(r)]);
  }
