@@ -2,3 +2,5 @@ MaxDepth: 1
 MaxBoards: 10000000
 CornerValue: 42
 EdgeValue: 4
+Color: Black
+Timeout: 10

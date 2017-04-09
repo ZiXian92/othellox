@@ -21,6 +21,8 @@
 #define COL(pos) (pos%C)
 
 #define MASTER_PID 0
+#define WHITE 0
+#define BLACK 1
 #define MAX(a, b) (a>b? a: b)
 #define MIN(a, b) (a<b? a: b)
 
@@ -28,7 +30,7 @@ int initBoard(char*, char*);
 void deinitBoard();
 void printBoard(int brd[const]);
 
-int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, *board;
+int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT, *board;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -49,16 +51,13 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
  	MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
 
- 	// printf("Board done\n");
-
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
  	if(pid==MASTER_PID) {
  		res = initBoard(argv[1], argv[2]);	// Initialize board
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
- 		if(res) {
- 			printf("initBoard failed. Exiting master %d\n", pid);
- 		} else {
+ 		if(res) printf("initBoard failed. Exiting master %d\n", pid);
+ 		else {
  			printf("Successfully initBoard. Resuming master %d\n", pid);
  		}
  		// printBoard(board);
@@ -66,9 +65,8 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	} else {	// Slave just run original minimax with alpha-beta pruning.
  		// Wait for initialization result of master
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
- 		if(res) {
- 			printf("initBoard failed. Exiting slave %d\n", pid);
- 		} else {
+ 		if(res) printf("initBoard failed. Exiting slave %d\n", pid);
+ 		else {
  			printf("Successfully initboard. Starting slave %d\n", pid);
  		}
  	}
@@ -159,6 +157,18 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	start = cur+12; cur = strchr(start, '\n');	// 4th line is EdgeValue: <edgevalue>
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
  	EDGEVALUE = atoi(start);
+
+ 	// Read playing color
+ 	start = cur+7; cur = strchr(start, '\n');	// 5th line is Color: <White|Black>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	COLOR = !strcmp(start, "WHITE")? WHITE: BLACK;
+
+ 	// Read timeout value
+ 	start = cur+9; cur = strchr(start, '\n');	// 6th line is Timeout: <timeout>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	TIMEOUT = atoi(start);
+
+ 	printf("%d %d\n", COLOR, TIMEOUT);
 
  	MPI_File_close(&paramsfp);	// Done with params file. Close it.
 
