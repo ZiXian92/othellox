@@ -168,8 +168,6 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
  	TIMEOUT = atoi(start);
 
- 	printf("%d %d\n", COLOR, TIMEOUT);
-
  	MPI_File_close(&paramsfp);	// Done with params file. Close it.
 
  	return 0;
