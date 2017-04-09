@@ -18,8 +18,8 @@
 #define TAKEN(r) (r+R)
 
 // Convenience macros to get row and column numbers from the given position
-#define ROW(pos) (pos/C)
-#define COL(pos) (pos%C)
+#define ROW(pos) ((pos)/C)
+#define COL(pos) ((pos)%C)
 
 #define MASTER_PID 0
 #define WHITE 0
@@ -31,8 +31,14 @@ unsigned long long elapsedTime(struct timeval, struct timeval);
 int initBoard(char*, char*);
 void deinitBoard();
 void printBoard(int brd[const]);
+void printOutput();
+int isLegalMove(int brd[const], int pos, int color);
+void masterProcess();
+void slaveProcess();
 
-int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT, *board;
+int R = -1, C = -1, pid, numProcs, numBestMoves, depth, pruned, tempPruned, numBoards;
+int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
+int *board, *bestMoves, *legalMoves;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -40,7 +46,7 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
  * 876	[a1][b1][c1]
  */
 
- int main(int argc, char **argv) {
+int main(int argc, char **argv) {
  	int res;
  	struct timeval starttime, endtime;
 
@@ -60,25 +66,152 @@ int R = -1, C = -1, pid, numProcs, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, 
 		gettimeofday(&starttime, NULL);
  		res = initBoard(argv[1], argv[2]);	// Initialize board
  		gettimeofday(&endtime, NULL);
- 		printf("Time taken to load input: %lf ms\n", elapsedTime(starttime, endtime));
+ 		printf("Time taken to load input: %lld ms\n", elapsedTime(starttime, endtime));
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
  		if(res) printf("initBoard failed. Exiting master %d\n", pid);
  		else {
- 			printf("Successfully initBoard. Resuming master %d\n", pid);
+ 			masterProcess();
+ 			// Print best moves and statistics
+ 			printOutput();
+ 			free(bestMoves);
  		}
- 		// printBoard(board);
  		deinitBoard();
  	} else {	// Slave just run original minimax with alpha-beta pruning.
  		// Wait for initialization result of master
  		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
  		if(res) printf("initBoard failed. Exiting slave %d\n", pid);
- 		else {
- 			printf("Successfully initboard. Starting slave %d\n", pid);
- 		}
+ 		else slaveProcess();
  	}
  	MPI_Finalize();
  	return 0;
  }
+
+// Returns a bitmap of valid directions. Value of 0 means no valid direction.
+// Assumes C<32.
+// Directions are: up, down, left, right, upleft, upright, downleft, downright
+int isLegalMove(int brd[const], int pos, int color) {
+	int r = ROW(pos), c = COL(pos), res = 0, mask = 1<<c, r2, c2, captureCount;
+
+	// Position already taken, not legal move at all!
+	if(brd[TAKEN(r)]&mask) return 0;
+
+	// Check up
+	for(r2=r-1, mask=1<<c, captureCount=0; r2>=0; r2--) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && captureCount>0) res|=128;
+
+	// Check down
+	for(r2=r+1, mask=1<<c, captureCount=0; r2<R; r2++) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && captureCount>0) res|=64;
+
+	// Check left
+	for(mask=1<<(c+1); mask<(1<<C); mask<<=1) {
+		if(!(brd[TAKEN(r)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(mask<(1<<C) && captureCount>0) res|=32;
+
+	// Check right
+	for(mask=1<<(c-1); mask>0; mask>>=1) {
+		if(!(brd[TAKEN(r)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(mask>0 && captureCount>0) res|=16;
+
+	// Check upleft
+	for(r2=r-1, mask=1<<(c+1); r2>=0 && mask<(1<<C); r2--, mask<<=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && mask<(1<<C) && captureCount>0) res|=8;
+
+	// Check upright
+	for(r2=r-1, mask=1<<(c-1); r2>=0 && mask>0; r2--, mask>>=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && mask>0 && captureCount>0) res|=4;
+
+	// Check downleft
+	for(r2=r+1, mask=1<<(c+1); r2<R && mask<(1<<C); r2++, mask<<=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && mask<(1<<C) && captureCount>0) res|=2;
+
+	// Check downright
+	for(r2=r+1, mask=1<<(c-1); r2<R && mask>0; r2++, mask>>=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && mask>0 && captureCount>0) res|=1;
+	return res;
+}
+
+// Returns number of legal moves found.
+// The moves array will be filled with legal moves found.
+// The last 8 bits of each move indicate the flippable directions for that move.
+// Pre-condition: moves must be large enough to hold any possible number of moves.
+int getLegalMoves(int brd[const], int color, int moves[]) {
+	int pos, numMoves = 0, dir;
+	for(pos=0; pos<R*C; pos++)
+		if(dir = isLegalMove(brd, pos, color)) moves[numMoves++] = (pos<<8)|dir;
+	return numMoves;
+}
+
+// Coordination work by master process
+void masterProcess() {
+	int numLegalMoves;
+	printf("Successfully initBoard. Resuming master %d\n", pid);
+
+	// Assume board is not too big that storing all positions is infeasible
+	// Assume successful allocation
+	bestMoves = malloc(R*C*sizeof(int));
+	legalMoves = malloc(R*C*sizeof(int));
+	numLegalMoves = getLegalMoves(board, COLOR, legalMoves);
+	memcpy((void *)bestMoves, (void *)legalMoves, numLegalMoves*sizeof(int));
+	numBestMoves = numBoards = numLegalMoves;
+	depth = 0; pruned = 0;
+	free(legalMoves);
+}
+
+// Work done by each slave
+void slaveProcess() {
+	printf("Successfully initboard. Starting slave %d\n", pid);
+
+	// Get memory to store legal moves
+	legalMoves = malloc(R*C*sizeof(int));
+
+	free(legalMoves);
+}
+
+// Precondition: numBestMoves and bestMoves must be properly set up.
+void printOutput() {
+	int r, i; char c;
+	printf("Best moves: { ");
+	for(i=0; i<numBestMoves; i++) {
+		r = R-ROW(bestMoves[i]>>8); c = C-1-COL(bestMoves[i]>>8)+'a';
+		printf(i? ",%c%d": "%c%d", c, r);
+	}
+	printf(" }\n");
+	printf("Number of boards assessed: %llu\n", numBoards);
+	printf("Depth of boards: %d\n", MAXDEPTH-depth);
+	printf("Entire space: "); printf(pruned? "false\n": "true\n");
+	printf("Elapsed time in seconds: 123\n");
+}
 
 // Returns elpased time in millseconds
 unsigned long long elapsedTime(struct timeval start, struct timeval end) {
