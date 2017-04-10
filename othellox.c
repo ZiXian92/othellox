@@ -33,6 +33,8 @@ void deinitBoard();
 void printBoard(int brd[const]);
 void printOutput();
 int isLegalMove(int brd[const], int pos, int color);
+int evaluateBoard(int brd[const]);
+int masteralphabeta(int brd[const], const int depth, const int color, int *alpha, int *beta);
 void masterProcess();
 void slaveProcess();
 
@@ -60,28 +62,23 @@ int main(int argc, char **argv) {
  	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
  	MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
 
+ 	// Here, assume all operations are successful.
+ 	// Failure handling makes the code too complicated and deviates away from
+ 	// developing program logic.
+ 	res = initBoard(argv[1], argv[2]);	// Initialize board
+ 	bestMoves = malloc(R*C*sizeof(int)); legalMoves = malloc(R*C*sizeof(int));
+
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
  	if(pid==MASTER_PID) {
-		gettimeofday(&starttime, NULL);
- 		res = initBoard(argv[1], argv[2]);	// Initialize board
- 		gettimeofday(&endtime, NULL);
- 		printf("Time taken to load input: %lld ms\n", elapsedTime(starttime, endtime));
- 		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
- 		if(res) printf("initBoard failed. Exiting master %d\n", pid);
- 		else {
- 			masterProcess();
- 			// Print best moves and statistics
- 			printOutput();
- 			free(bestMoves);
- 		}
- 		deinitBoard();
+ 		masterProcess();
  	} else {	// Slave just run original minimax with alpha-beta pruning.
- 		// Wait for initialization result of master
- 		MPI_Bcast((void *)&res, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
- 		if(res) printf("initBoard failed. Exiting slave %d\n", pid);
- 		else slaveProcess();
+ 		slaveProcess();
  	}
+
+ 	free(bestMoves); free(legalMoves);
+ 	deinitBoard();
+
  	MPI_Finalize();
  	return 0;
  }
@@ -164,12 +161,56 @@ int isLegalMove(int brd[const], int pos, int color) {
 // Returns number of legal moves found.
 // The moves array will be filled with legal moves found.
 // The last 8 bits of each move indicate the flippable directions for that move.
-// Pre-condition: moves must be large enough to hold any possible number of moves.
+// Pre-condition: moves must be large enough to hold any possible number of moves if not null.
 int getLegalMoves(int brd[const], int color, int moves[]) {
 	int pos, numMoves = 0, dir;
 	for(pos=0; pos<R*C; pos++)
-		if(dir = isLegalMove(brd, pos, color)) moves[numMoves++] = (pos<<8)|dir;
+		if(dir = isLegalMove(brd, pos, color)) {
+			if(moves) moves[numMoves++] = (pos<<8)|dir;
+			else numMoves++;
+		}
 	return numMoves;
+}
+
+// Computes heuristic score for the given board.
+// Scores are based on maximizing player - minimizing player for each heuristic.
+// Assume values will fir into 32-bit signed integer.
+int evaluateBoard(int brd[const]) {
+	double score = 0; int totalDiscs = 0, numBlack, numWhite, r, mask = (1<<C)-1;
+
+	// Compute difference in number of discs controlled
+	for(r=0; r<R; r++) {
+		totalDiscs+=__builtin_popcount(brd[TAKEN(r)]&mask);
+		numBlack+=__builtin_popcount(brd[BOARD(r)]&brd[TAKEN(r)]&mask);
+	}
+	numWhite = totalDiscs-numBlack;
+	score = (COLOR==WHITE? -1: 1)*(numBlack-numWhite)/(double)totalDiscs;
+
+	// Compute difference in number of legal moves
+	numBlack = getLegalMoves(brd, BLACK, NULL);
+	numWhite = getLegalMoves(brd, WHITE, NULL);
+	score+=(COLOR==WHITE? -1: 1)*10.0*(numBlack-numWhite)/(numBlack+numWhite);
+
+	// Compute difference in corner values
+	mask = (1<<(C-1))|1;
+	totalDiscs = __builtin_popcount(mask&brd[TAKEN(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]);
+	numBlack = __builtin_popcount(mask&brd[TAKEN(0)]&brd[BOARD(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]&brd[BOARD(R-1)]);
+	numWhite = totalDiscs-numBlack;
+	score+=(COLOR==WHITE? -1: 1)*CORNERVALUE*(numBlack-numWhite)/(double)totalDiscs;
+
+	// Compute difference in edge values
+	totalDiscs = 0; numBlack = 0;
+	for(r=1; r<R-1; r++) {	// For vertical edges
+		totalDiscs+=__builtin_popcount(mask&brd[TAKEN(r)]);
+		numBlack+=__builtin_popcount(mask&brd[TAKEN(r)]&brd[BOARD(r)]);
+	}
+	mask^=((1<<C)-1);	// Horizontal edges
+	totalDiscs+=__builtin_popcount(mask&brd[TAKEN(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]);
+	numBlack+=__builtin_popcount(mask&brd[TAKEN(0)]&brd[BOARD(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]&brd[BOARD(R-1)]);
+	numWhite = totalDiscs-numBlack;
+	score+=(COLOR==WHITE? -1: 1)*EDGEVALUE*(numBlack-numWhite)/(double)totalDiscs;
+
+	return (int)round(score);
 }
 
 // Coordination work by master process
@@ -179,23 +220,26 @@ void masterProcess() {
 
 	// Assume board is not too big that storing all positions is infeasible
 	// Assume successful allocation
-	bestMoves = malloc(R*C*sizeof(int));
-	legalMoves = malloc(R*C*sizeof(int));
 	numLegalMoves = getLegalMoves(board, COLOR, legalMoves);
 	memcpy((void *)bestMoves, (void *)legalMoves, numLegalMoves*sizeof(int));
 	numBestMoves = numBoards = numLegalMoves;
 	depth = 0; pruned = 0;
-	free(legalMoves);
+
+	printOutput();
 }
 
 // Work done by each slave
 void slaveProcess() {
 	printf("Successfully initboard. Starting slave %d\n", pid);
+}
 
-	// Get memory to store legal moves
-	legalMoves = malloc(R*C*sizeof(int));
-
-	free(legalMoves);
+// Only does recursively for 1 branch of search tree
+int masteralphabeta(int brd[const], const int depth, const int color, int *alpha, int *beta) {
+	int shouldMaximise = color==COLOR, score;
+	if(!depth) {
+		score = evaluateBoard(brd);
+	}
+	return 0;
 }
 
 // Precondition: numBestMoves and bestMoves must be properly set up.
@@ -227,7 +271,7 @@ int initBoard(char *boardfile, char *paramfile) {
  	MPI_Status status;
 
  	// Open board file
- 	if(err = MPI_File_open(MPI_COMM_SELF, boardfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &brdfp)) {
+ 	if(err = MPI_File_open(MPI_COMM_WORLD, boardfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &brdfp)) {
  		printf("Unable to open board file\n");
  		return -1;
  	}
@@ -272,7 +316,7 @@ int initBoard(char *boardfile, char *paramfile) {
  	MPI_File_close(&brdfp);	// Done with board file. Close it.
 
  	// Open params file for reading
- 	if(err = MPI_File_open(MPI_COMM_SELF, paramfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &paramsfp)) {
+ 	if(err = MPI_File_open(MPI_COMM_WORLD, paramfile, MPI_MODE_RDONLY, MPI_INFO_NULL, &paramsfp)) {
  		printf("Unable to open params file\n");
  		return -1;
  	}
@@ -293,7 +337,7 @@ int initBoard(char *boardfile, char *paramfile) {
  	// Read max boards
  	start = cur+12; cur = strchr(start, '\n');	// 2nd line is MaxBoards: <maxboards>
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
- 	MAXBOARDS = atoi(start);
+	MAXBOARDS = atoi(start);
 
  	// Read corner value
  	start = cur+14; cur = strchr(start, '\n');	// 3rd line is CornerValue: <cornervalue>
