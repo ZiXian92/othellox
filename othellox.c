@@ -27,20 +27,24 @@
 #define MAX(a, b) (a>b? a: b)
 #define MIN(a, b) (a<b? a: b)
 
+/* Function declarations */
 unsigned long long elapsedTime(struct timeval, struct timeval);
-int initBoard(char*, char*);
+int initBoard(char *boardfile, char *paramfile);
 void deinitBoard();
 void printBoard(int brd[const]);
 void printOutput();
+void applyMove(int destbrd[], int srcbrd[const], const int move, const int color);
 int isLegalMove(int brd[const], int pos, int color);
 int evaluateBoard(int brd[const]);
-int masteralphabeta(int brd[const], const int depth, const int color, int *alpha, int *beta);
+int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int *alpha, int *beta);
 void masterProcess();
 void slaveProcess();
+/* End function declarations */
 
 int R = -1, C = -1, pid, numProcs, numBestMoves, depth, pruned, tempPruned, numBoards;
+int alpha, beta, tempAlpha, tempBeta;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
-int *board, *bestMoves, *legalMoves;
+int *board, *bestMoves, *legalMoves, *tempMoves;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -67,6 +71,7 @@ int main(int argc, char **argv) {
  	// developing program logic.
  	res = initBoard(argv[1], argv[2]);	// Initialize board
  	bestMoves = malloc(R*C*sizeof(int)); legalMoves = malloc(R*C*sizeof(int));
+ 	tempMoves = malloc(R*C*sizeof(int));
 
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
@@ -76,7 +81,7 @@ int main(int argc, char **argv) {
  		slaveProcess();
  	}
 
- 	free(bestMoves); free(legalMoves);
+ 	free(bestMoves); free(legalMoves); free(tempMoves);
  	deinitBoard();
 
  	MPI_Finalize();
@@ -172,6 +177,11 @@ int getLegalMoves(int brd[const], int color, int moves[]) {
 	return numMoves;
 }
 
+// Generate new board by applying the given move to the given board.
+void applyMove(int destbrd[], int srcbrd[const], const int move, const int color) {
+
+}
+
 // Computes heuristic score for the given board.
 // Scores are based on maximizing player - minimizing player for each heuristic.
 // Assume values will fir into 32-bit signed integer.
@@ -225,6 +235,12 @@ void masterProcess() {
 	numBestMoves = numBoards = numLegalMoves;
 	depth = 0; pruned = 0;
 
+	if(numLegalMoves) {
+		alpha = 1<<31; beta = ~alpha;
+		masteralphabeta(board, MAXDEPTH, COLOR, 0, &alpha, &beta);
+		// printf("Alpha: %d, Beta: %d\n", alpha, beta);
+	}
+
 	printOutput();
 }
 
@@ -234,12 +250,30 @@ void slaveProcess() {
 }
 
 // Only does recursively for 1 branch of search tree
-int masteralphabeta(int brd[const], const int depth, const int color, int *alpha, int *beta) {
-	int shouldMaximise = color==COLOR, score;
-	if(!depth) {
+int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int *alpha, int *beta) {
+	int shouldMaximise = color==COLOR, nextMove, score = 0, *brdcpy;
+	if(!depth) {	// Leaf node: not specified to go deeper!
 		score = evaluateBoard(brd);
+		if(shouldMaximise) *alpha = MAX(*alpha, score);
+		else *beta = MIN(*beta, score);
+		return score;
 	}
-	return 0;
+
+	nextMove = getLegalMoves(brd, color, tempMoves);	// Get a feasible move. Recycling nextMove to count legal moves.
+	if(nextMove) {
+		// Grab 1st move since only evaluating 1 full path on master.
+		nextMove = tempMoves[0]; brdcpy = malloc((R<<1)*sizeof(int));
+		applyMove(brdcpy, brd, nextMove, color);
+		score = masteralphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
+		free(brdcpy);
+	} else if(!passed) score = masteralphabeta(brd, depth-1, !color, 1, alpha, beta);	// Skip
+	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
+
+	// Update alpha or beta respectively
+	if(shouldMaximise) *alpha = MAX(*alpha, score);
+	else *beta = MIN(*beta, score);
+
+	return score;
 }
 
 // Precondition: numBestMoves and bestMoves must be properly set up.
