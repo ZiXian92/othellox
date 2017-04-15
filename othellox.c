@@ -36,7 +36,7 @@ void printOutput();
 void applyMove(int destbrd[], int srcbrd[const], const int move, const int color);
 int isLegalMove(int brd[const], int pos, int color);
 int evaluateBoard(int brd[const]);
-int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int *alpha, int *beta);
+int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int alpha, int beta);
 void masterProcess();
 void slaveProcess();
 /* End function declarations */
@@ -237,7 +237,7 @@ void masterProcess() {
 
 	if(numLegalMoves) {
 		alpha = 1<<31; beta = ~alpha;
-		masteralphabeta(board, MAXDEPTH, COLOR, 0, &alpha, &beta);
+		masteralphabeta(board, MAXDEPTH, COLOR, 0, alpha, beta);
 		// printf("Alpha: %d, Beta: %d\n", alpha, beta);
 	}
 
@@ -250,12 +250,12 @@ void slaveProcess() {
 }
 
 // Only does recursively for 1 branch of search tree
-int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int *alpha, int *beta) {
+int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int alpha, int beta) {
 	int shouldMaximise = color==COLOR, nextMove, score = 0, *brdcpy;
 	if(!depth) {	// Leaf node: not specified to go deeper!
 		score = evaluateBoard(brd);
-		if(shouldMaximise) *alpha = MAX(*alpha, score);
-		else *beta = MIN(*beta, score);
+		if(shouldMaximise) alpha = MAX(alpha, score);
+		else beta = MIN(beta, score);
 		return score;
 	}
 
@@ -270,8 +270,8 @@ int masteralphabeta(int brd[const], const int depth, const int color, const int 
 	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
 
 	// Update alpha or beta respectively
-	if(shouldMaximise) *alpha = MAX(*alpha, score);
-	else *beta = MIN(*beta, score);
+	if(shouldMaximise) alpha = MAX(alpha, score);
+	else beta = MIN(beta, score);
 
 	return score;
 }
@@ -345,7 +345,19 @@ int initBoard(char *boardfile, char *paramfile) {
 	while(ptok!=NULL) {
 		c = C-1-(ptok[0]-'a'); r = R-atoi(ptok+1); ptok = strtok(NULL, ",");
 		board[TAKEN(r)]|=(1<<c); board[BOARD(r)]|=(1<<c);
-	}	
+	}
+
+	// Read playing color
+ 	start = cur+8; cur = strchr(start, '\n');	// 3th line is Color: <White|Black>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	COLOR = !strcmp(start, "WHITE")? WHITE: BLACK;
+
+ 	// Read timeout value
+ 	start = cur+10; cur = strchr(start, '\n');	// 4th line is Timeout: <timeout>
+ 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
+ 	TIMEOUT = atoi(start);
+
+ 	printf("%d %d\n", COLOR, TIMEOUT);	
 
  	MPI_File_close(&brdfp);	// Done with board file. Close it.
 
@@ -382,16 +394,6 @@ int initBoard(char *boardfile, char *paramfile) {
  	start = cur+12; cur = strchr(start, '\n');	// 4th line is EdgeValue: <edgevalue>
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
  	EDGEVALUE = atoi(start);
-
- 	// Read playing color
- 	start = cur+7; cur = strchr(start, '\n');	// 5th line is Color: <White|Black>
- 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
- 	COLOR = !strcmp(start, "WHITE")? WHITE: BLACK;
-
- 	// Read timeout value
- 	start = cur+9; cur = strchr(start, '\n');	// 6th line is Timeout: <timeout>
- 	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
- 	TIMEOUT = atoi(start);
 
  	MPI_File_close(&paramsfp);	// Done with params file. Close it.
 
