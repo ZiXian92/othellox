@@ -323,7 +323,7 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 			beta = MIN(beta, res);
 		}
 		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
-		if(numBoards>=MAXBOARDS) break;
+		if(numBoards>=MAXBOARDS) { pruned|=(i+1<nMoves); break; }
 	}
 
 	free(tempMoves); free(brdcpy);
