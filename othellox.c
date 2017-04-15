@@ -35,10 +35,12 @@
 #define DIRMASK(move) ((move)&((1<<DIRBITS)-1))
 #define ENCODEMOVE(pos, dirs) (((pos)<<DIRBITS)|(dirs))
 
-#define MASTER_PID 0
+#define MASTER_PID (numProcs-1)
 #define WHITE 0
 #define BLACK 1
-#define STARTMOVEIDX(sid, nMoves, nSlaves) (((sid)-1)*(nMoves)/(nSlaves))
+#define MINALPHA (1<<31)
+#define MAXBETA (~MINALPHA)
+#define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
@@ -58,8 +60,8 @@ void masterProcess();
 void slaveProcess(const int startMoveIdx, const int endMoveIdx);	// Processes legalMoves[startMoveIdx..(endMoveIdx-1)]
 /* End function declarations */
 
-int R = -1, C = -1, pid, numProcs, depth, pruned, tempPruned, numBoards, numMoves;
-int alpha, beta, tempAlpha, tempBeta;
+int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves;
+int ab[2], tempab[2];
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
 int *board, bestMove, *legalMoves, *scores;
 
@@ -100,6 +102,7 @@ int main(int argc, char **argv) {
  		slaveProcess(STARTMOVEIDX(pid, numMoves, numProcs-1), STARTMOVEIDX(pid+1, numMoves, numProcs-1));
  	}
 
+ 	// Cleanup
  	free(legalMoves);
  	deinitBoard();
 
@@ -292,21 +295,22 @@ void masterProcess() {
 	// Assume board is not too big that storing all positions is infeasible
 	// Assume successful allocation
 	int *recvcounts = malloc(numProcs*sizeof(int)), *displs = malloc(numProcs*sizeof(int)), i, bestScore;
-	
-	numBoards = numMoves;
-	depth = 0; pruned = 0;
+
+	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
 
 	if(numMoves) {
 		scores = malloc(numMoves*sizeof(int));
-		alpha = 1<<31; beta = ~alpha;
-		masteralphabeta(board, MAXDEPTH, COLOR, 0, alpha, beta);
-		// printf("Alpha: %d, Beta: %d\n", alpha, beta);
+
+		// Find initial alpha and beta values and broadcast to all slaves
+		// in hope of faster pruning.
+		ab[0] = ab[1] = masteralphabeta(board, MAXDEPTH, COLOR, 0, MINALPHA, MAXBETA);
+		MPI_Bcast(&ab, 2, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
 
 		// TODO: Implement loop to receive and broadcast updated alpha values
 
 		// Compute how many scores to receive from each slave
-		recvcounts[0] = displs[0] = 0;
-		for(i=1; i<numProcs; i++) {
+		recvcounts[numProcs-1] = displs[numProcs-1] = 0;
+		for(i=0; i<numProcs-1; i++) {
 			displs[i] = STARTMOVEIDX(i, numMoves, numProcs-1);
 			recvcounts[i] = STARTMOVEIDX(i+1, numMoves, numProcs-1)-displs[i];
 		}
@@ -315,13 +319,18 @@ void masterProcess() {
 		MPI_Gatherv(NULL, 0, MPI_INT, scores, recvcounts, displs, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
 
 		// Process scores to get best move(s)
-		bestScore = bestMove = 1;
+		bestScore = bestMove = -1;
 		for(i=0; i<numMoves; i++) if(bestScore<scores[i]) { bestScore = scores[i]; bestMove = legalMoves[i]; }
+
+		// Gather other statistics
+		MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+		MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 
 		// Cleanup variables in intermediate computation
 		free(scores); free(recvcounts); free(displs);
 	} else {	// No legal move
-		bestMove = -1; numBoards = 0; depth = 0; pruned = 0;
+		bestMove = -1; numBoards = 1;
 	}
 
 	printOutput(bestMove);	// Print output
@@ -332,29 +341,41 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	int i, *brdcpy;
 
 	// TODO: Remove printf statements here
-	if(startMoveIdx>=endMoveIdx) { printf("Slave %d not processing any move\n", pid); return; }
-	printf("Slave %d processing move indices %d to %d inclusive\n", pid, startMoveIdx, endMoveIdx-1);
+	if(startMoveIdx>=endMoveIdx) {
+		numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
+		MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+		MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+		return;
+	}
+	// printf("Slave %d processing move indices %d to %d inclusive\n", pid, startMoveIdx, endMoveIdx-1);
 
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(int));	// Prepare holder for each move's score
 	brdcpy = malloc((R<<1)*sizeof(int));
+
+	// Receive initial alpha and beta from master
+	MPI_Bcast(&ab, 2, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
+
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
 		applyMove(brdcpy, board, legalMoves[i], COLOR);	// Apply given move to evaluate
-		// TODO: Start the real minimax algorithm
+		scores[i-startMoveIdx] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, ab[0], MAXBETA);	// Evaluate subtree
 	}
-	for(i=startMoveIdx; i<endMoveIdx; i++) scores[i-startMoveIdx] = i;
 
+	// Send scores and then help compute search statistics
 	MPI_Gatherv(scores, endMoveIdx-startMoveIdx, MPI_INT, NULL, NULL, NULL, MPI_INT, MASTER_PID, MPI_COMM_WORLD);
+	MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+	MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+
 	free(scores);	// Cleanup
 }
 
 // Only does recursively for 1 branch of search tree
 int masteralphabeta(int brd[const], const int depth, const int color, const int passed, int alpha, int beta) {
 	int shouldMaximise = color==COLOR, nextMove, score = 0, *brdcpy, *tempMoves;
+	lowestDepth = MIN(lowestDepth, depth); numBoards++;
 	if(!depth) {	// Leaf node: not specified to go deeper!
-		score = evaluateBoard(brd);
-		if(shouldMaximise) alpha = MAX(alpha, score);
-		else beta = MIN(beta, score);
-		return score;
+		return evaluateBoard(brd);
 	}
 
 	tempMoves = malloc(R*C*sizeof(int));
@@ -368,11 +389,17 @@ int masteralphabeta(int brd[const], const int depth, const int color, const int 
 	} else if(!passed) score = masteralphabeta(brd, depth-1, !color, 1, alpha, beta);	// Skip
 	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
 
-	// Update alpha or beta respectively
-	if(shouldMaximise) alpha = MAX(alpha, score);
-	else beta = MIN(beta, score);
-
 	return score;
+}
+
+// This is actually done on slaves
+// TODO: Implement
+int alphabeta(int brd[const], const int depth, const int color, const int passed, int alpha, int beta) {
+	numBoards++; lowestDepth = MIN(lowestDepth, depth);
+
+	// If can tell is pruned
+	// pruned|=1;
+	return 0;
 }
 
 // Precondition: numBestMoves and bestMoves must be properly set up.
@@ -386,7 +413,7 @@ void printOutput(const int bestMove) {
 	}
 	printf(" }\n");
 	printf("Number of boards assessed: %llu\n", numBoards);
-	printf("Depth of boards: %d\n", MAXDEPTH-depth);
+	printf("Depth of boards: %d\n", MAXDEPTH-lowestDepth);
 	printf("Entire space: "); printf(pruned? "false\n": "true\n");
 	printf("Elapsed time in seconds: 123\n");
 }
