@@ -65,7 +65,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx);	// Processes le
 int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves;
 double bestAlpha, tempAlpha, *scores;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
-int *board, bestMove, *legalMoves;
+int *board, bestMove, *legalMoves, shouldStop;
 struct timespec starttime, endtime;
 
 /* Position labels in program, different from input
@@ -404,11 +404,8 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 // TODO: Implement
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
 	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
-	double res = isMaxPlayer? MINALPHA: MAXBETA;
+	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
-
-	if(pid==7) printf("Process %d (%d, %d, %d)\n", pid, depth, color, passed);
-
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
@@ -419,12 +416,13 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
 	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
 	else for(i=0; i<nMoves; i++) {
+		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
 		applyMove(brdcpy, brd, tempMoves[i], color);
 		if(isMaxPlayer) {
-			res = MAX(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			res = MAX(res, score);
 			alpha = MAX(alpha, res);
 		} else {
-			res = MIN(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			res = MIN(res, score);
 			beta = MIN(beta, res);
 		}
 		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
@@ -508,7 +506,7 @@ int initBoard(char *boardfile, char *paramfile) {
 	// Read playing color
  	start = cur+8; cur = strchr(start, '\n');	// 3th line is Color: <White|Black>
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
- 	COLOR = !strcmp(start, "WHITE")? WHITE: BLACK;
+ 	COLOR = !strcmp(start, "White")? WHITE: BLACK;
 
  	// Read timeout value
  	start = cur+10; cur = strchr(start, '\n');	// 4th line is Timeout: <timeout>
