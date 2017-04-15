@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
  			applyMove(brdcpy, board, legalMoves[i], COLOR);
  			scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, MINALPHA, MAXBETA);
  			if(scores[i]>bestScore){ bestScore = scores[i]; bestMove = legalMoves[i]; }
+ 			if(numBoards>=MAXBOARDS) break;
  		}
  		free(scores);
  	} else {	// No legal move
@@ -297,40 +298,36 @@ double evaluateBoard(int brd[const]) {
 }
 
 // This is actually done on slaves
-// TODO: Implement
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
 	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
-	double res = isMaxPlayer? MINALPHA: MAXBETA;
+	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
-
-	printf("Process %d (%d, %d, %d)\n", pid, depth, color, passed);
-	printf("%d\n", isMaxPlayer);
-
+	if(numBoards>=MAXBOARDS) return evaluateBoard(brd);
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
 	tempMoves = malloc(R*C*sizeof(int));
 	brdcpy = malloc((R<<1)*sizeof(int));
 	nMoves = getLegalMoves(brd, color, tempMoves);
-	printf("Depth %d %d moves\n", depth, nMoves);
 
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
 	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
 	else for(i=0; i<nMoves; i++) {
-		printf("Depth %d i %d nMoves %d\n", depth, i, nMoves);
-		printf("Applying move at %d\n", POS(tempMoves[i]));
 		applyMove(brdcpy, brd, tempMoves[i], color);
+		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
 		if(isMaxPlayer) {
-			res = MAX(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			res = MAX(res, score);
 			alpha = MAX(alpha, res);
 		} else {
-			res = MIN(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			res = MIN(res, score);
 			beta = MIN(beta, res);
 		}
 		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
+		if(numBoards>=MAXBOARDS) break;
 	}
 
 	free(tempMoves); free(brdcpy);
+
 	return res;
 }
 
