@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
+// #include <sys/time.h>
+#include <time.h>
 
 // 6144 bytes should be able to capture the largest of solvable boards like 26x26.
 // Being unable to read line by line is hard if have to read multiple times and take care of cases
@@ -46,7 +47,7 @@
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
 /* Function declarations */
-double elapsedTime(struct timeval, struct timeval);
+double elapsedTime(struct timespec, struct timespec);
 int initBoard(char *boardfile, char *paramfile);
 void deinitBoard();
 void printBoard(int brd[const]);
@@ -65,7 +66,7 @@ int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, n
 double bestAlpha, tempAlpha, *scores;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
 int *board, bestMove, *legalMoves;
-struct timeval starttime, endtime;
+struct timespec starttime, endtime;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -75,7 +76,6 @@ struct timeval starttime, endtime;
 
 int main(int argc, char **argv) {
  	int res;
- 	struct timeval starttime, endtime;
 
  	// Make sure the input files are given
  	if(argc<3){
@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	gettimeofday(&starttime, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &starttime);
 
  	MPI_Init(&argc, &argv);
  	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
@@ -340,7 +340,7 @@ void masterProcess() {
 		bestMove = -1; numBoards = 1;
 	}
 
-	gettimeofday(&endtime, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &endtime);
 
 	printOutput(bestMove);	// Print output
 }
@@ -349,15 +349,14 @@ void masterProcess() {
 void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	int i, *brdcpy;
 
-	// TODO: Remove printf statements here
+	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
+
 	if(startMoveIdx>=endMoveIdx) {
-		numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
 		MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 		MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 		MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 		return;
 	}
-	// printf("Slave %d processing move indices %d to %d inclusive\n", pid, startMoveIdx, endMoveIdx-1);
 
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(double));	// Prepare holder for each move's score
 	brdcpy = malloc((R<<1)*sizeof(int));
@@ -404,10 +403,12 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 // This is actually done on slaves
 // TODO: Implement
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
-	int *tempMoves, *brdcpy, nMoves, i, move, score;
-	int isMaxPlayer = color==COLOR;
-	double res = isMaxPlayer? MINALPHA: MAXBETA;;
+	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
+	double res = isMaxPlayer? MINALPHA: MAXBETA;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
+
+	if(pid==7) printf("Process %d (%d, %d, %d)\n", pid, depth, color, passed);
+
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
@@ -426,7 +427,7 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 			res = MIN(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
 			beta = MIN(beta, res);
 		}
-		if(beta<=alpha) { pruned|=i+1<nMoves; break; }
+		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
 	}
 
 	free(tempMoves); free(brdcpy);
@@ -450,11 +451,10 @@ void printOutput(const int bestMove) {
 }
 
 // Returns elpased time in millseconds
-double elapsedTime(struct timeval start, struct timeval end) {
+double elapsedTime(struct timespec start, struct timespec end) {
 	double timetaken = end.tv_sec-start.tv_sec;
-	return timetaken;
-	// if(end.tv_usec<start.tv_usec) { timetaken-=1; end.tv_usec+=1000000; }
-	// return timetaken+(end.tv_usec-start.tv_usec)/1000000.0;
+	if(end.tv_nsec<start.tv_nsec) { timetaken-=1; end.tv_nsec+=1000000000; }
+	return timetaken+(end.tv_nsec-start.tv_nsec)/1000000000.0;
 }
 
 int initBoard(char *boardfile, char *paramfile) {
