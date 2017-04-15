@@ -1,10 +1,68 @@
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define MAX(a, b) (a>b? a: b)
-#define MIN(a, b) (a<b? a: b)
+#include <sys/time.h>
+#include <time.h>
+
+// 6144 bytes should be able to capture the largest of solvable boards like 26x26.
+// Being unable to read line by line is hard if have to read multiple times and take care of cases
+// when newlines are not aligned to buffer.
+// Bigger sizes not really tractable and this program is not intended to solve arbitrarily big boards.
+#define INPUT_BUF_LEN 6144
+
+// These 2 allows for board and occupied mask to be condensed into 1 array.
+// This is so that sending a board to slave only takes 1 communication.
+#define BOARD(r) (r)
+#define TAKEN(r) ((r)+R)
+
+// Convenience macros to get row and column numbers from the given position
+#define ROW(pos) ((pos)/C)
+#define COL(pos) ((pos)%C)
+
+// Move encoding
+#define DIRBITS 8
+#define DOWNRIGHTMASK 1
+#define DOWNLEFTMASK (DOWNRIGHTMASK<<1)
+#define UPRIGHTMASK (DOWNLEFTMASK<<1)
+#define UPLEFTMASK (UPRIGHTMASK<<1)
+#define RIGHTMASK (UPLEFTMASK<<1)
+#define LEFTMASK (RIGHTMASK<<1)
+#define DOWNMASK (LEFTMASK<<1)
+#define UPMASK (DOWNMASK<<1)
+#define POS(move) ((move)>>DIRBITS)
+#define DIRMASK(move) ((move)&((1<<DIRBITS)-1))
+#define ENCODEMOVE(pos, dirs) (((pos)<<DIRBITS)|(dirs))
+
+#define MASTER_PID (numProcs-1)
+#define WHITE 0
+#define BLACK 1
+#define MINALPHA (-DBL_MAX)
+#define MAXBETA DBL_MAX
+#define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
+#define MAX(a, b) ((a)>(b)? (a): (b))
+#define MIN(a, b) ((a)<(b)? (a): (b))
+
+/* Function declarations */
+double elapsedTime(struct timeval, struct timeval);
+int initBoard(char *boardfile, char *paramfile);
+void deinitBoard();
+void printBoard(int brd[const]);
+void printOutput(const int bestMove);
+void applyMove(int destbrd[], int srcbrd[const], const int move, const int color);
+int isLegalMove(int brd[const], const int pos, const int color);
+int getLegalMoves(int brd[const], const int color, int moves[]);
+double evaluateBoard(int brd[const]);
+double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta);
+/* End function declarations */
+
+int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves;
+double bestAlpha, tempAlpha, *scores;
+int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
+int *board, bestMove, *legalMoves;
+struct timeval starttime, endtime;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -12,284 +70,298 @@
  * 876	[a1][b1][c1]
  */
 
-struct Vector { int *arr, size, capacity; };
+int main(int argc, char **argv) {
+ 	int res, i, *brdcpy;
+ 	double bestScore;
 
-// Must call this before using Vector
-void vectorInit(struct Vector *v){
-	v->arr = malloc(2*sizeof(int));	// Assume all malloc successful here for simplicity
-	v->capacity = 2; v->size = 0;
-}
-
-// Must call this when done with the Vector object
-void vectorDestroy(struct Vector *v){
-	if(v->arr!=NULL) free(v->arr);
-	v->size = v->capacity = 0;
-}
-
-void vectorClear(struct Vector *v){ v->size = 0; }
-
-void vectorPush(struct Vector *v, int elem){
-	int i;
-	if(v->size==v->capacity){	// Already full, expand the array
-		int *temp = malloc(v->capacity*2*sizeof(int));	// Allocate double the size
-		memcpy((void*)temp, (void*)v->arr, v->size*sizeof(int));	// Copy over to new array
-		free(v->arr); v->capacity<<=1;
-		v->arr = temp;
-	}
-	v->arr[v->size++] = elem;	// Append to array
-}
-
-struct Solution {
-	int pruned, depth;
-	unsigned long long numBoards;
-	struct Vector moves;
-};
-
-int R = -1, C = -1, MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, *board, *taken;
-
-// Returns a bitmap of directions contributing to legality of move.
-// Order of bits from most significant bit: [up, down, left, right, upleft, upright, downleft, downright]
-int isLegalMove(int brd[const], int taken[const], int pos, const int color){
-	int r = pos/C, c = pos%C, pos2, dirs = 0, temp;
-
-	for(pos2=pos-C, temp=0; pos2>=0; pos2-=C){	// Scan upwards
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2<0? 0: temp;	// Possible to reach edge without seeing same color
-	if(temp) dirs|=128;
-
-	for(pos2=pos+C, temp=0; pos2<R*C; pos2+=C){	// Scan downwards
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2>=R*C? 0: temp;	// Possible to reach edge without seeing same color
-	if(temp) dirs|=64;
-
-	for(pos2=pos+1, temp=0; pos2%C>0; pos2++){	// Scan leftwards
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2%C==0? 0: temp; // Possible to reach edge without seeing same color
-	if(temp) dirs|=32;
-
-	if(pos%C>0){
-		for(pos2=pos-1, temp=0; pos2%C>=0; pos2--){	// Scan rightwards
-			r = pos2/C; c = pos2%C;
-			if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-			if(color!=!!(brd[r]&(1<<c))) temp++;
-			else break;	// See same color, know how many opposite color disk(s) trapped
-		}
-		temp = pos2==-1 || pos2%C==C-1? 0: temp; // Possible to reach edge without seeing same color
-		if(temp) dirs|=16;
-	}
-
-	for(pos2=pos+1-C, temp=0; pos2>0; pos2-=C-1){	// Scan upleft
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2<=0? 0: temp; // Possible to reach edge without seeing same color
-	if(temp) dirs|=8;
-
-	for(pos2=pos-1-C, temp=0; pos2>=0; pos2-=C+1){	// Scan upright
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2<0? 0: temp; // Possible to reach edge without seeing same color
-	if(temp) dirs|=4;
-
-	for(pos2=pos+1+C, temp=0; pos2<R*C; pos2+=C+1){	// Scan downleft
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2>=R*C? 0: temp; // Possible to reach edge without seeing same color
-	if(temp) dirs|=2;
-
-	for(pos2=pos-1+C, temp=0; pos2<R*C; pos2+=C-1){	// Scan downright
-		r = pos2/C; c = pos2%C;
-		if(!(taken[r]&(1<<c))){ temp = 0; break; }	// Fail to trap any opposite color disk
-		if(color!=!!(brd[r]&(1<<c))) temp++;
-		else break;	// See same color, know how many opposite color disk(s) trapped
-	}
-	temp = pos2>=R*C? 0: temp; // Possible to reach edge without seeing same color
-	if(temp) dirs|=1;
-
-	return dirs;
-}
-
-// This should only be called with dirs properly set by isLegalMove.
-// pos here should be the same as that used in isLegalMove.
-// With dirs mask check, we can ignore taken table and just check for color difference in for-loop
-void flipDiscs(int brd[const], int pos, int dirs){
-	int pos2, r = pos/C, c = pos%C, mask = 1<<c, color = !!(brd[r]&mask);
-	if(dirs&128)	// Upwards
-		for(pos2=r-1; pos2>=0 && color!=!!(brd[pos2]&mask); pos2--) brd[pos2]^=mask;
-
-	if(dirs&64)	// Downwards
-		for(pos2=r+1; pos2<R && color!=!!(brd[pos2]&mask); pos2++) brd[pos2]^=mask;
-
-	if(dirs&32)	// Leftwards
-		for(mask=1<<(c+1); color!=!!(brd[r]&mask); mask<<=1) brd[r]^=mask;
-
-	if(dirs&16)	// Rightwards
-		for(mask=1<<(c-1); color!=!!(brd[r]&mask); mask>>=1) brd[r]^=mask;
-
-	if(dirs&8)	// Upleft
-		for(mask=1<<(c+1), pos2=r-1; pos2>=0 && color!=!!(brd[pos2]&mask); pos2--, mask<<=1)
-			brd[pos2]^=mask;
-
-	if(dirs&4)	// Upright
-		for(mask=1<<(c-1), pos2=r-1; pos2>=0 && color!=!!(brd[pos2]&mask); pos2--, mask>>=1)
-			brd[pos2]^=mask;
-
-	if(dirs&2)	// Downleft
-		for(mask=1<<(c+1), pos2=r+1; pos2<R && color!=!!(brd[pos2]&mask); pos2++, mask<<=1)
-			brd[pos2]^=mask;
-
-	if(dirs&1)	// Downright
-		for(mask=1<<(c-1), pos2=r+1; pos2<R && color!=!!(brd[pos2]&mask); pos2++, mask>>=1)
-			brd[pos2]^=mask;
-}
-
-int evaluateBoard(int brd[const], int taken[const]){
-	int numBlack = 0, numWhite = 0, pos, r, c, mask, numCorners, temp, diff;
-	double res = 0;
-
-	// Disc counting
-	for(r=0; r<R; r++){ numBlack+=__builtin_popcount(brd[r]); numWhite+=__builtin_popcount(taken[r]); }
-	numWhite-=numBlack; res = fabs((double)(numWhite-numBlack)/(numWhite+numBlack));
-
-	// Mobility counting
-	numBlack = numWhite = 0;
-	for(pos=0; pos<R*C; pos++){
-		r = R-1-pos/C; c = C-1-(pos%C);
-		if(!(taken[r]&(1<<c))){
-			if(isLegalMove(brd, taken, pos, 0)) numWhite++;
-			if(isLegalMove(brd, taken, pos, 1)) numBlack++;
-		}
-	}
-	res+=10.0*fabs((double)(numWhite-numBlack)/(numWhite+numBlack));
-
-	// Strategic pieces
-	// Handle corners
-	mask = 1|(1<<(C-1));	// Corner mask
-	r = taken[0]&mask; c = taken[R-1]&mask;
-	numCorners = __builtin_popcount(r)+__builtin_popcount(c);	// Number of corners occupied
-	r&=brd[0]; c&=brd[R-1]; r = __builtin_popcount(r)+__builtin_popcount(c); c = numCorners-r;
-	diff = (r-c)*CORNERVALUE; numCorners*=CORNERVALUE;
-
-	// Handle vertical edges
-	for(pos=1; pos<R-1; pos++){	// Reusing pos as row number
-		r = taken[pos]&mask; temp = __builtin_popcount(r);
-		r = __builtin_popcount(brd[pos]&r); c = temp-r;
-		diff+=(r-c)*EDGEVALUE; numCorners+=temp*EDGEVALUE;
-	}
-
-	// Handle top and bottom edges
-	mask = (1<<C)-1-mask;
-	r = taken[0]&mask; c = taken[R-1]&mask;	// Reuse r and c to get occupied cells in top and bottom edges
-	temp = __builtin_popcount(r)+__builtin_popcount(c);	// Total number of edge cells taken
-	r&=brd[0]; c&=brd[R-1]; r = __builtin_popcount(r)+__builtin_popcount(c); c = temp-r;
-	diff+=(r-c)*EDGEVALUE; numCorners+=temp*EDGEVALUE;
-
-	res+=(double)abs(diff)/numCorners;
-
-	return (int)round(res);
-}
-
-int alphabeta(int brd[const], int taken[const], int depth, int alpha, int beta, int shouldMaximise, int passed, struct Solution *sol){
-	int res = shouldMaximise? 1<<31: ~(1<<31), res2, pos, r, c, *brdcpy, *takencpy, shouldPass = 1, dirs;
-	struct Vector moves; vectorInit(&moves);
-
-	if(!depth){	// Terminal node in search tree. No possible moves.
-		if(sol!=NULL){
-			vectorClear(&sol->moves); sol->depth = 0; sol->pruned|=0; sol->numBoards++;
-		}
-		return evaluateBoard(brd, taken);
-	}
-
-	// Set up copy of board and taken
-	brdcpy = malloc(R*sizeof(int)); takencpy = malloc(R*sizeof(int));
-
-
-	// Brute-force try all positions
-	for(pos=0; pos<R*C; pos++){
-		r = R-1-pos/C; c = C-1-(pos%C);
-		if(!(taken[r]&(1<<c)) && (dirs = isLegalMove(brd, taken, pos, !!shouldMaximise))){
-			// Make fresh copy of the boards
-			memcpy((void*)brdcpy, (void*)brd, R*sizeof(int));
-			memcpy((void*)takencpy, (void*)taken, R*sizeof(int));
-
-			// Place the disk on board copy.
-			brdcpy[r] = shouldMaximise? brd[r]|(1<<c): brd[r]; takencpy[r] = taken[r]|(1<<c);
-			flipDiscs(brdcpy, pos, dirs);
-			shouldPass = 0;
-			res2 = alphabeta(brdcpy, takencpy, depth-1, alpha, beta, !shouldMaximise, 0, sol);
-
-			// Update set of maximizing/minimizing moves
-			if(shouldMaximise){
-				if(res2>res) vectorClear(&moves);
-				if(res2>=res) vectorPush(&moves, pos);
-				res = MAX(res, res2);
-			}
-			else{
-				if(res2<res) vectorClear(&moves);
-				if(res2<=res) vectorPush(&moves, pos);
-				res = MIN(res, res2);
-			}
-			if(sol!=NULL) sol->numBoards++;
-			if(beta<=alpha){ sol->pruned = 1; break; }
-		}
-	}
-
-	// Cannot find any legal move, either pass or endgame
-	if(shouldPass) res = passed? evaluateBoard(brd, taken): alphabeta(brd, taken, depth-1, alpha, beta, !shouldMaximise, 1, sol);
-
-	vectorDestroy(&sol->moves); sol->moves = moves;	// Replace sol->moves with own moves
-	free(brdcpy); free(takencpy);
-	return res;
-}
-
-void printSolution(struct Solution * const sol){
-	int i, r; char c;
-	printf("Best moves: { ");
-	for(i=0; i<sol->moves.size; i++){
-		c = C-1-(sol->moves.arr[i]%C)+'a'; r = R-sol->moves.arr[i]/C;
-		printf(i? ",%c%d": "%c%d", c, r);
-		// printf(i? ",%d":"%d", sol->moves.arr[i]);
-	}
-	printf(" }\n");
-	printf("Number of boards assessed: %llu\n", sol->numBoards);
-	printf("Depth of boards: %d\n", MAXDEPTH-sol->depth);
-	printf("Entire space: "); printf(sol->pruned? "false\n": "true\n");
-	printf("Elapsed time in seconds: 123\n");
-}
-
-int main(int argc, char **argv){
-	if(argc<3){
+ 	// Make sure the input files are given
+ 	if(argc<3){
 		printf("Format: ./othellox-serial <board_file> <eval_params_file>\n");
 		return 1;
 	}
 
-	struct Solution sol;
-	sol.numBoards = sol.pruned = 0;
-	FILE *brdfile = fopen(argv[1], "r"), *evalfile = fopen(argv[2], "r");
-	int len, r, c;
-	char buf[1024], *ptok;
+	gettimeofday(&starttime, NULL);
 
-	// Read board size
+ 	// Here, assume all operations are successful.
+ 	// Failure handling makes the code too complicated and deviates away from
+ 	// developing program logic.
+ 	res = initBoard(argv[1], argv[2]);	// Initialize board
+ 	legalMoves = malloc(R*C*sizeof(int));
+
+ 	// All compute valid first moves
+ 	numMoves = getLegalMoves(board, COLOR, legalMoves);
+
+ 	if(numMoves){
+ 		scores = malloc(numMoves*sizeof(double));
+ 		bestScore = MINALPHA; bestMove = -1;
+ 		brdcpy = malloc(R*2*sizeof(int));
+ 		for(i=0; i<numMoves; i++) {
+ 			applyMove(brdcpy, board, legalMoves[i], COLOR);
+ 			scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, MINALPHA, MAXBETA);
+ 			if(scores[i]>bestScore){ bestScore = scores[i]; bestMove = legalMoves[i]; }
+ 		}
+ 		free(scores);
+ 	} else {	// No legal move
+		bestMove = -1; numBoards = 1;
+	}
+
+	gettimeofday(&endtime, NULL);
+
+	printOutput(bestMove);
+
+ 	// Cleanup
+ 	free(legalMoves);
+ 	deinitBoard();
+
+ 	return 0;
+ }
+
+// Returns a bitmap of valid directions. Value of 0 means no valid direction.
+// Assumes C<32.
+// Directions are: up, down, left, right, upleft, upright, downleft, downright
+int isLegalMove(int brd[const], const int pos, const int color) {
+	int r = ROW(pos), c = COL(pos), res = 0, mask = 1<<c, r2, c2, captureCount;
+
+	// Position already taken, not legal move at all!
+	if(brd[TAKEN(r)]&mask) return 0;
+
+	// Check up
+	for(r2=r-1, mask=1<<c, captureCount=0; r2>=0; r2--) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && captureCount>0) res|=UPMASK;
+
+	// Check down
+	for(r2=r+1, mask=1<<c, captureCount=0; r2<R; r2++) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && captureCount>0) res|=DOWNMASK;
+
+	// Check left
+	for(mask=1<<(c+1); mask<(1<<C); mask<<=1) {
+		if(!(brd[TAKEN(r)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(mask<(1<<C) && captureCount>0) res|=LEFTMASK;
+
+	// Check right
+	for(mask=1<<(c-1); mask>0; mask>>=1) {
+		if(!(brd[TAKEN(r)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(mask>0 && captureCount>0) res|=RIGHTMASK;
+
+	// Check upleft
+	for(r2=r-1, mask=1<<(c+1); r2>=0 && mask<(1<<C); r2--, mask<<=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && mask<(1<<C) && captureCount>0) res|=UPLEFTMASK;
+
+	// Check upright
+	for(r2=r-1, mask=1<<(c-1); r2>=0 && mask>0; r2--, mask>>=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2>=0 && mask>0 && captureCount>0) res|=UPRIGHTMASK;
+
+	// Check downleft
+	for(r2=r+1, mask=1<<(c+1); r2<R && mask<(1<<C); r2++, mask<<=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && mask<(1<<C) && captureCount>0) res|=DOWNLEFTMASK;
+
+	// Check downright
+	for(r2=r+1, mask=1<<(c-1); r2<R && mask>0; r2++, mask>>=1) {
+		if(!(brd[TAKEN(r2)]&mask)) { captureCount = 0; break; }	// Not taken, cannot capture
+		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
+		captureCount++;
+	}
+	if(r2<R && mask>0 && captureCount>0) res|=DOWNRIGHTMASK;
+	return res;
+}
+
+// Returns number of legal moves found.
+// The moves array will be filled with legal moves found.
+// The last 8 bits of each move indicate the flippable directions for that move.
+// Pre-condition: moves must be large enough to hold any possible number of moves if not null.
+int getLegalMoves(int brd[const], const int color, int moves[]) {
+	int pos, numMoves = 0, dir;
+	for(pos=0; pos<R*C; pos++)
+		if(dir = isLegalMove(brd, pos, color)) {
+			if(moves) moves[numMoves++] = ENCODEMOVE(pos, dir);
+			else numMoves++;
+		}
+	return numMoves;
+}
+
+// Generate new board by applying the given move to the given board.
+// Assumes a valid board.
+void applyMove(int destbrd[], int srcbrd[const], const int move, const int color) {
+	if(POS(move)<0 || POS(move)>=R*C){ printf("Invalid position found\n"); return; }
+	int pos = POS(move), dirs = DIRMASK(move), r = ROW(pos), c = COL(pos), mask = 1<<c, r2;
+
+	// Copy srcbrd over so we can flip bits later
+	memcpy((void*)destbrd, (void*)srcbrd, (R<<1)*sizeof(int));
+
+	// If position already occupied, illegal move! Do nothing.
+	if(destbrd[TAKEN(r)]&mask){ printf("Taking occupied cell\n"); return; }
+
+	// Place the correct color disc on the specified position.
+	destbrd[TAKEN(r)]|=mask;
+	if(color==BLACK) destbrd[BOARD(r)]|=mask;
+
+	// Scan all valid directions and flip discs. Assume dirs is properly set up.
+	// So it is always possible to find back same color without going out-of-bounds or
+	// encountering empty cell on VALID board.
+	if(dirs&UPMASK)
+		for(r2=r-1; color!=!!(destbrd[BOARD(r2)]&mask); r2--) destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNMASK)
+		for(r2=r+1; color!=!!(destbrd[BOARD(r2)]&mask); r2++) destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&LEFTMASK)
+		for(mask=1<<(c+1); color!=!!(destbrd[BOARD(r)]&mask); mask<<=1)
+			destbrd[BOARD(r)]^=mask;
+
+	if(dirs&RIGHTMASK)
+		for(mask=1<<(c-1); color!=!!(destbrd[BOARD(r)]&mask); mask>>=1)
+			destbrd[BOARD(r)]^=mask;
+
+	if(dirs&UPLEFTMASK)
+		for(r2=r-1, mask=1<<(c+1); color!=!!(destbrd[BOARD(r2)]&mask); r2--, mask<<=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&UPRIGHTMASK)
+		for(r2=r-1, mask=1<<(c-1); color!=!!(destbrd[BOARD(r2)]&mask); r2--, mask>>=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNLEFTMASK)
+		for(r2=r+1, mask=1<<(c+1); color!=!!(destbrd[BOARD(r2)]&mask); r2++, mask<<=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNRIGHTMASK)
+		for(r2=r+1, mask=1<<(c-1); color!=!!(destbrd[BOARD(r2)]&mask); r2++, mask>>=1)
+			destbrd[BOARD(r2)]^=mask;
+}
+
+// Computes heuristic score for the given board.
+// Scores are based on maximizing player - minimizing player for each heuristic.
+// Assume values will fit into 32-bit signed integer.
+double evaluateBoard(int brd[const]) {
+	double score = 0; int totalDiscs = 0, numBlack = 0, numWhite = 0, r, mask = (1<<C)-1;
+
+	// Compute difference in number of discs controlled
+	for(r=0; r<R; r++) {
+		totalDiscs+=__builtin_popcount(brd[TAKEN(r)]&mask);
+		numBlack+=__builtin_popcount(brd[BOARD(r)]&brd[TAKEN(r)]&mask);
+	}
+	numWhite = totalDiscs-numBlack;
+	if(totalDiscs) score = (COLOR==WHITE? -1: 1)*(numBlack-numWhite)/(double)totalDiscs;
+
+	// Compute difference in number of legal moves
+	numBlack = getLegalMoves(brd, BLACK, NULL);
+	numWhite = getLegalMoves(brd, WHITE, NULL);
+	if(numBlack+numWhite) score+=(COLOR==WHITE? -1: 1)*10.0*(numBlack-numWhite)/(numBlack+numWhite);
+
+	// Compute difference in corner values
+	mask = (1<<(C-1))|1;
+	totalDiscs = __builtin_popcount(mask&brd[TAKEN(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]);
+	numBlack = __builtin_popcount(mask&brd[TAKEN(0)]&brd[BOARD(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]&brd[BOARD(R-1)]);
+	numWhite = totalDiscs-numBlack;
+	if(totalDiscs) score+=(COLOR==WHITE? -1: 1)*CORNERVALUE*(numBlack-numWhite)/(double)totalDiscs;
+
+	// Compute difference in edge values
+	totalDiscs = 0; numBlack = 0;
+	for(r=1; r<R-1; r++) {	// For vertical edges
+		totalDiscs+=__builtin_popcount(mask&brd[TAKEN(r)]);
+		numBlack+=__builtin_popcount(mask&brd[TAKEN(r)]&brd[BOARD(r)]);
+	}
+	mask^=((1<<C)-1);	// Horizontal edges
+	totalDiscs+=__builtin_popcount(mask&brd[TAKEN(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]);
+	numBlack+=__builtin_popcount(mask&brd[TAKEN(0)]&brd[BOARD(0)])+__builtin_popcount(mask&brd[TAKEN(R-1)]&brd[BOARD(R-1)]);
+	numWhite = totalDiscs-numBlack;
+	if(totalDiscs) score+=(COLOR==WHITE? -1: 1)*EDGEVALUE*(numBlack-numWhite)/(double)totalDiscs;
+
+	return score;
+}
+
+// This is actually done on slaves
+// TODO: Implement
+double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
+	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
+	double res = isMaxPlayer? MINALPHA: MAXBETA;
+	numBoards++; lowestDepth = MIN(lowestDepth, depth);
+
+	printf("Process %d (%d, %d, %d)\n", pid, depth, color, passed);
+	printf("%d\n", isMaxPlayer);
+
+
+	if(!depth) return evaluateBoard(brd);	// Leaf node
+
+	tempMoves = malloc(R*C*sizeof(int));
+	brdcpy = malloc((R<<1)*sizeof(int));
+	nMoves = getLegalMoves(brd, color, tempMoves);
+	printf("Depth %d %d moves\n", depth, nMoves);
+
+	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
+	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
+	else for(i=0; i<nMoves; i++) {
+		printf("Depth %d i %d nMoves %d\n", depth, i, nMoves);
+		printf("Applying move at %d\n", POS(tempMoves[i]));
+		applyMove(brdcpy, brd, tempMoves[i], color);
+		if(isMaxPlayer) {
+			res = MAX(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			alpha = MAX(alpha, res);
+		} else {
+			res = MIN(res, alphabeta(brdcpy, depth-1, !color, 0, alpha, beta));
+			beta = MIN(beta, res);
+		}
+		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
+	}
+
+	free(tempMoves); free(brdcpy);
+	return res;
+}
+
+// Precondition: numBestMoves and bestMoves must be properly set up.
+void printOutput(const int bestMove) {
+	int r, i; char c;
+	printf("Best moves: { ");
+	if(bestMove<0) printf("na");
+	else {
+		r = R-ROW(POS(bestMove)); c = C-1-COL(POS(bestMove))+'a';
+		printf("%c%d", c, r);
+	}
+	printf(" }\n");
+	printf("Number of boards assessed: %llu\n", numBoards);
+	printf("Depth of boards: %d\n", MAXDEPTH-lowestDepth);
+	printf("Entire space: "); printf(pruned? "false\n": "true\n");
+	printf("Elapsed time in seconds: %lf\n", elapsedTime(starttime, endtime));
+}
+
+// Returns elpased time in millseconds
+double elapsedTime(struct timeval start, struct timeval end) {
+	double timetaken = end.tv_sec-start.tv_sec;
+	if(end.tv_usec<start.tv_usec) { timetaken-=1; end.tv_usec+=1000000; }
+	return timetaken+(end.tv_usec-start.tv_usec)/1000000.0;
+}
+
+int initBoard(char *boardfile, char *paramfile) {
+ 	FILE *brdfile = fopen(boardfile, "r"), *evalfile = fopen(paramfile, "r");
+ 	char buf[1024], *ptok; int len, r, c;
+
+ 	// Read board size
 	fgets(buf, 1024, brdfile); len = strlen(buf)-1;
 	while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
 	ptok = strtok(buf+6, ",");
@@ -298,7 +370,8 @@ int main(int argc, char **argv){
 		else if(R==-1) R = atoi(ptok);
 		else break;
 	}
-	board = malloc(R*sizeof(int)); taken = malloc(R*sizeof(int));
+	board = malloc(R*2*sizeof(int));
+	memset(board, 0, R*2*sizeof(int));
 
 	// Read and process white positions
 	fgets(buf, 1024, brdfile); len = strlen(buf)-1;
@@ -306,7 +379,7 @@ int main(int argc, char **argv){
 	ptok = strtok(buf+9, ",");
 	while(ptok!=NULL){
 		c = C-1-(ptok[0]-'a'); r = R-atoi(ptok+1); ptok = strtok(NULL, ",");
-		taken[r]|=(1<<c);
+		board[TAKEN(r)]|=(1<<c);
 	}
 
 	// Read and process black positions
@@ -315,8 +388,18 @@ int main(int argc, char **argv){
 	ptok = strtok(buf+9, ",");
 	while(ptok!=NULL){
 		c = C-1-(ptok[0]-'a'); r = R-atoi(ptok+1); ptok = strtok(NULL, ",");
-		taken[r]|=(1<<c); board[r]|=(1<<c);
+		board[TAKEN(r)]|=(1<<c); board[BOARD(r)]|=(1<<c);
 	}
+
+	// Read color value
+	fgets(buf, 1024, brdfile); len = strlen(buf)-1;
+	while(len>=0 && !isalnum(buf[len])) buf[len--] = 0;
+	COLOR = !strcmp(buf+7, "White")? WHITE: BLACK;
+
+	// Read timeout value
+	fgets(buf, 1024, brdfile); len = strlen(buf)-1;
+	while(len>=0 && !isalnum(buf[len])) buf[len--] = 0;
+	TIMEOUT = atoi(buf+9);
 	fclose(brdfile);
 
 	// Read max depth
@@ -339,13 +422,17 @@ int main(int argc, char **argv){
 	while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
 	EDGEVALUE = atoi(buf+11);
 	fclose(evalfile);
+}
 
-	// Main algorithm here
-	sol.depth = MAXDEPTH; vectorInit(&sol.moves);
-	alphabeta(board, taken, MAXDEPTH, 1<<31, ~(1<<31), 1, 0, &sol);
-	printSolution(&sol);
+void deinitBoard() {
+ 	if(board!=NULL) free(board);
+ 	board = NULL;
+}
 
-	// Clean up allocated memory
-	vectorDestroy(&sol.moves); free(board); free(taken);
-	return 0;
+void printBoard(int brd[const]) {
+ 	int r;
+ 	printf("Board:\n");
+ 	for(r=0; r<R; r++) printf("%d\n", brd[BOARD(r)]&brd[TAKEN(r)]);
+ 	printf("Board occupancy\n");
+ 	for(r=0; r<R; r++) printf("%d\n", brd[TAKEN(r)]);
 }
