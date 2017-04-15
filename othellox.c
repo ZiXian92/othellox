@@ -21,6 +21,20 @@
 #define ROW(pos) ((pos)/C)
 #define COL(pos) ((pos)%C)
 
+// Move encoding
+#define DIRBITS 8
+#define DOWNRIGHTMASK 1
+#define DOWNLEFTMASK (DOWNRIGHTMASK<<1)
+#define UPRIGHTMASK (DOWNLEFTMASK<<1)
+#define UPLEFTMASK (UPRIGHTMASK<<1)
+#define RIGHTMASK (UPLEFTMASK<<1)
+#define LEFTMASK (RIGHTMASK<<1)
+#define DOWNMASK (LEFTMASK<<1)
+#define UPMASK (DOWNMASK<<1)
+#define POS(move) (move>>DIRBITS)
+#define DIRMASK(move) (move&((1<<DIRBITS)-1))
+#define ENCODEMOVE(pos, dirs) ((pos<<DIRBITS)|dirs)
+
 #define MASTER_PID 0
 #define WHITE 0
 #define BLACK 1
@@ -103,7 +117,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2>=0 && captureCount>0) res|=128;
+	if(r2>=0 && captureCount>0) res|=UPMASK;
 
 	// Check down
 	for(r2=r+1, mask=1<<c, captureCount=0; r2<R; r2++) {
@@ -111,7 +125,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2<R && captureCount>0) res|=64;
+	if(r2<R && captureCount>0) res|=DOWNMASK;
 
 	// Check left
 	for(mask=1<<(c+1); mask<(1<<C); mask<<=1) {
@@ -119,7 +133,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(mask<(1<<C) && captureCount>0) res|=32;
+	if(mask<(1<<C) && captureCount>0) res|=LEFTMASK;
 
 	// Check right
 	for(mask=1<<(c-1); mask>0; mask>>=1) {
@@ -127,7 +141,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(mask>0 && captureCount>0) res|=16;
+	if(mask>0 && captureCount>0) res|=RIGHTMASK;
 
 	// Check upleft
 	for(r2=r-1, mask=1<<(c+1); r2>=0 && mask<(1<<C); r2--, mask<<=1) {
@@ -135,7 +149,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2>=0 && mask<(1<<C) && captureCount>0) res|=8;
+	if(r2>=0 && mask<(1<<C) && captureCount>0) res|=UPLEFTMASK;
 
 	// Check upright
 	for(r2=r-1, mask=1<<(c-1); r2>=0 && mask>0; r2--, mask>>=1) {
@@ -143,7 +157,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2>=0 && mask>0 && captureCount>0) res|=4;
+	if(r2>=0 && mask>0 && captureCount>0) res|=UPRIGHTMASK;
 
 	// Check downleft
 	for(r2=r+1, mask=1<<(c+1); r2<R && mask<(1<<C); r2++, mask<<=1) {
@@ -151,7 +165,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2<R && mask<(1<<C) && captureCount>0) res|=2;
+	if(r2<R && mask<(1<<C) && captureCount>0) res|=DOWNLEFTMASK;
 
 	// Check downright
 	for(r2=r+1, mask=1<<(c-1); r2<R && mask>0; r2++, mask>>=1) {
@@ -159,7 +173,7 @@ int isLegalMove(int brd[const], int pos, int color) {
 		if(color==!!(brd[BOARD(r2)]&mask)) break;	// Captured 0 or more
 		captureCount++;
 	}
-	if(r2<R && mask>0 && captureCount>0) res|=1;
+	if(r2<R && mask>0 && captureCount>0) res|=DOWNRIGHTMASK;
 	return res;
 }
 
@@ -171,15 +185,60 @@ int getLegalMoves(int brd[const], int color, int moves[]) {
 	int pos, numMoves = 0, dir;
 	for(pos=0; pos<R*C; pos++)
 		if(dir = isLegalMove(brd, pos, color)) {
-			if(moves) moves[numMoves++] = (pos<<8)|dir;
+			if(moves) moves[numMoves++] = ENCODEMOVE(pos, dir);
 			else numMoves++;
 		}
 	return numMoves;
 }
 
 // Generate new board by applying the given move to the given board.
+// Assumes a valid board.
 void applyMove(int destbrd[], int srcbrd[const], const int move, const int color) {
+	if(POS(move)<0 || POS(move)>=R*C){ printf("Invalid position found\n"); return; }
+	int pos = POS(move), dirs = DIRMASK(move), r = ROW(pos), c = COL(pos), mask = 1<<c, r2;
 
+	// Copy srcbrd over so we can flip bits later
+	memcpy((void*)destbrd, (void*)srcbrd, (R<<1)*sizeof(int));
+
+	// If position already occupied, illegal move! Do nothing.
+	if(destbrd[TAKEN(r)]&mask){ printf("Taking occupied cell\n"); return; }
+
+	// Place the correct color disc on the specified position.
+	destbrd[TAKEN(r)]|=mask;
+	if(color==BLACK) destbrd[BOARD(r)]|=mask;
+
+	// Scan all valid directions and flip discs. Assume dirs is properly set up.
+	// So it is always possible to find back same color without going out-of-bounds or
+	// encountering empty cell on VALID board.
+	if(dirs&UPMASK)
+		for(r2=r-1; color!=!!(destbrd[BOARD(r2)]&mask); r2--) destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNMASK)
+		for(r2=r+1; color!=!!(destbrd[BOARD(r2)]&mask); r2++) destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&LEFTMASK)
+		for(mask=1<<(c+1); color!=!!(destbrd[BOARD(r)]&mask); mask<<=1)
+			destbrd[BOARD(r)]^=mask;
+
+	if(dirs&RIGHTMASK)
+		for(mask=1<<(c-1); color!=!!(destbrd[BOARD(r)]&mask); mask>>=1)
+			destbrd[BOARD(r)]^=mask;
+
+	if(dirs&UPLEFTMASK)
+		for(r2=r-1, mask=1<<(c+1); color!=!!(destbrd[BOARD(r2)]&mask); r2--, mask<<=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&UPRIGHTMASK)
+		for(r2=r-1, mask=1<<(c-1); color!=!!(destbrd[BOARD(r2)]&mask); r2--, mask>>=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNLEFTMASK)
+		for(r2=r+1, mask=1<<(c+1); color!=!!(destbrd[BOARD(r2)]&mask); r2++, mask<<=1)
+			destbrd[BOARD(r2)]^=mask;
+
+	if(dirs&DOWNRIGHTMASK)
+		for(r2=r+1, mask=1<<(c-1); color!=!!(destbrd[BOARD(r2)]&mask); r2++, mask>>=1)
+			destbrd[BOARD(r2)]^=mask;
 }
 
 // Computes heuristic score for the given board.
@@ -356,8 +415,6 @@ int initBoard(char *boardfile, char *paramfile) {
  	start = cur+10; cur = strchr(start, '\n');	// 4th line is Timeout: <timeout>
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;
  	TIMEOUT = atoi(start);
-
- 	printf("%d %d\n", COLOR, TIMEOUT);	
 
  	MPI_File_close(&brdfp);	// Done with board file. Close it.
 
