@@ -70,9 +70,9 @@ double bestAlpha, tempAlpha, *scores, timetaken;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
 int *board, bestMove, *legalMoves, shouldStop;
 struct timespec starttime, endtime;
-MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq;
-int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag;
-MPI_Comm alphaChannel, stopChannel;
+MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq, alphabcastReq;
+int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastReqFlag;
+MPI_Comm alphaChannel, stopChannel, alphabcastChannel;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -96,6 +96,7 @@ int main(int argc, char **argv) {
  	MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
  	MPI_Comm_dup(MPI_COMM_WORLD, &alphaChannel);
  	MPI_Comm_dup(MPI_COMM_WORLD, &stopChannel);
+ 	MPI_Comm_dup(MPI_COMM_WORLD, &alphabcastChannel);
 
  	// Here, assume all operations are successful.
  	// Failure handling makes the code too complicated and deviates away from
@@ -317,7 +318,8 @@ void masterProcess() {
 		// Find initial alpha and beta values and broadcast to all slaves
 		// in hope of faster pruning.
 		bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
-		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphaChannel);
+		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
+
 
 		// Leave a request open to gather best results for all legal moves
 		// Compute how many scores to receive from each slave
@@ -396,7 +398,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	memset(scores, 0, (endMoveIdx-startMoveIdx)*sizeof(double));
 
 	// Receive initial alpha and beta from master
-	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphaChannel);
+	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
 		// Check if master has issued a termination order
