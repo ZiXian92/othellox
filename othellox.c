@@ -143,10 +143,11 @@ int main(int argc, char **argv) {
 
  	// Cleanup
  	for(i=0; i<2; i++) free(moveList[i]);
- 	// for(i=0; i<=MAXDEPTH; i++) {
- 	// 	if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
- 	// 	if(orderedMoveList[i].others) free(orderedMoveList[i].others);
- 	// }
+ 	for(i=0; i<=MAXDEPTH; i++) {
+ 		if(orderedMoveList[i].corners) free(orderedMoveList[i].corners);
+ 		if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
+ 		if(orderedMoveList[i].others) free(orderedMoveList[i].others);
+ 	}
  	free(moveList);	free(orderedMoveList);
  	deinitBoard();
 
