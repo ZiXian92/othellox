@@ -76,6 +76,8 @@ MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq, alphabcastReq, board
 int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastReqFlag, boardCountReqFlag;
 MPI_Comm alphaChannel, stopChannel, alphabcastChannel, boardCountChannel;
 
+int **moveList;
+
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
  * 543	[a2][b2][c2]
@@ -83,7 +85,7 @@ MPI_Comm alphaChannel, stopChannel, alphabcastChannel, boardCountChannel;
  */
 
 int main(int argc, char **argv) {
- 	int res;
+ 	int res, i;
 
  	// Make sure the input files are given
  	if(argc<3){
@@ -105,10 +107,12 @@ int main(int argc, char **argv) {
  	// Failure handling makes the code too complicated and deviates away from
  	// developing program logic.
  	res = initBoard(argv[1], argv[2]);	// Initialize board
- 	legalMoves = malloc(R*C*sizeof(int));
+ 	// legalMoves = malloc(R*C*sizeof(int));
+ 	moveList = malloc((MAXDEPTH+1)*sizeof(int*));
+ 	for(i=0; i<=MAXDEPTH; i++) moveList[i] = malloc(R*C*sizeof(int));
 
  	// All compute valid first moves
- 	numMoves = getLegalMoves(board, COLOR, legalMoves);
+ 	numMoves = getLegalMoves(board, COLOR, moveList[MAXDEPTH]);
 
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
@@ -119,7 +123,9 @@ int main(int argc, char **argv) {
  	}
 
  	// Cleanup
- 	free(legalMoves);
+ 	for(i=0; i<=MAXDEPTH; i++) free(moveList[i]);
+ 	free(moveList);
+ 	// free(legalMoves);
  	deinitBoard();
 
  	MPI_Finalize();
@@ -310,7 +316,7 @@ double evaluateBoard(int brd[const]) {
 void masterProcess() {
 	// Assume board is not too big that storing all positions is infeasible
 	// Assume successful allocation
-	int *recvcounts = malloc(numProcs*sizeof(int)), *displs = malloc(numProcs*sizeof(int)), i;
+	int *recvcounts = malloc(numProcs*sizeof(int)), *displs = malloc(numProcs*sizeof(int)), i; 
 	double bestScore;
 
 	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
@@ -366,7 +372,7 @@ void masterProcess() {
 		// Here, all scores should be ready for processing.
 		// Process scores to get best move(s)
 		// for(i=0; i<numMoves; i++) printf(" %lf", scores[i]); printf("\n");
-		bestScore = MINALPHA; bestMove = -1;
+		bestScore = MINALPHA; bestMove = -1; legalMoves = moveList[MAXDEPTH];
 		for(i=0; i<numMoves; i++) if(bestScore<scores[i]) { bestScore = scores[i]; bestMove = legalMoves[i]; }
 
 		// Gather other statistics
@@ -436,6 +442,8 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 	MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
 
+	legalMoves = moveList[MAXDEPTH];
+
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
 		// Check if master has issued a termination order
 		MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
@@ -476,14 +484,14 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node: not specified to go deeper!
 
-	tempMoves = malloc(R*C*sizeof(int));
+	tempMoves = moveList[depth];
 	nextMove = getLegalMoves(brd, color, tempMoves);	// Get a feasible move. Recycling nextMove to count legal moves.
 	if(nextMove) {
 		// Grab 1st move since only evaluating 1 full path on master.
 		nextMove = tempMoves[0]; brdcpy = malloc((R<<1)*sizeof(int));
 		applyMove(brdcpy, brd, nextMove, color);
 		score = masteralphabeta(brdcpy, depth-1, !color, 0);
-		free(brdcpy); free(tempMoves);
+		free(brdcpy);
 	} else if(!passed) score = masteralphabeta(brd, depth-1, !color, 1);	// Skip
 	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
 
@@ -509,7 +517,7 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
-	tempMoves = malloc(R*C*sizeof(int));
+	tempMoves = moveList[depth];
 	brdcpy = malloc((R<<1)*sizeof(int));
 	nMoves = getLegalMoves(brd, color, tempMoves);
 
@@ -550,7 +558,7 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
 	}
 
-	free(tempMoves); free(brdcpy);
+	free(brdcpy);
 	return res;
 }
 
