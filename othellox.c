@@ -43,6 +43,7 @@
 #define MAXBETA DBL_MAX
 #define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
 #define TIMEOUT_THRESH (TIMEOUT-1.5)
+#define BOARD_UPDATE_THRESH (100)
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
@@ -320,7 +321,7 @@ void masterProcess() {
 		// in hope of faster pruning.
 		bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
 		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
-		MPI_Iscan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+		MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
 		// MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
 
 		// Leave a request open to gather best results for all legal moves
@@ -336,7 +337,7 @@ void masterProcess() {
 		MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
 		MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 		clock_gettime(CLOCK_REALTIME, &endtime);
-		while(!scoresReqFlag && (!boardCountReqFlag || numBoards<MAXBOARDS) && (timetaken = elapsedTime(starttime, endtime))<TIMEOUT_THRESH) {
+		while(!scoresReqFlag && (!boardCountReqFlag || totalBoards<MAXBOARDS) && (timetaken = elapsedTime(starttime, endtime))<TIMEOUT_THRESH) {
 			// Update and broadcast new globa alpha
 			// MPI_Test(&alphaReq, &alphaReqFlag, MPI_STATUS_IGNORE);
 			// if(alphaReqFlag) {
@@ -350,7 +351,7 @@ void masterProcess() {
 			// printf("Time taken: %lfs\n", timetaken);
 
 			// Check board counts
-			if(boardCountReqFlag) MPI_Iscan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+			if(boardCountReqFlag) MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
 			MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 			MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
 			clock_gettime(CLOCK_REALTIME, &endtime);
@@ -389,15 +390,22 @@ void masterProcess() {
 void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	int i, *brdcpy;
 
-	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
+	numBoards = totalBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
 
 	// Open a channel to receive stop signal.
 	MPI_Ibcast(&shouldStop, 1, MPI_INT, MASTER_PID, stopChannel, &stopSigReq);
 	MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
 
+	MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+	MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
+
 	if(startMoveIdx>=endMoveIdx) {
 		while(!stopSigReqFlag) {
 			// MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &boardCountReq);
+
+			MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
+			if(boardCountReqFlag) MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+
 			MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
 		}
 
@@ -468,6 +476,16 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
 	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
+
+	// Update global board count
+	if(numBoards>=BOARD_UPDATE_THRESH) {
+		MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
+		// Hope that Iscan won't take too long to complete
+		if(boardCountReqFlag) {
+			totalBoards = numBoards; numBoards = 0;
+			MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+		}
+	}
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
