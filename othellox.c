@@ -89,7 +89,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &starttime);
+	clock_gettime(CLOCK_REALTIME, &starttime);
 
  	MPI_Init(&argc, &argv);
  	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
@@ -319,7 +319,7 @@ void masterProcess() {
 		// in hope of faster pruning.
 		bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
 		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
-
+		MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
 
 		// Leave a request open to gather best results for all legal moves
 		// Compute how many scores to receive from each slave
@@ -332,14 +332,23 @@ void masterProcess() {
 
 		// TODO: Implement loop to receive and broadcast updated alpha values
 		MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
-		clock_gettime(CLOCK_MONOTONIC, &endtime);
+		clock_gettime(CLOCK_REALTIME, &endtime);
 		while(!scoresReqFlag && (timetaken = elapsedTime(starttime, endtime))<TIMEOUT_THRESH) {
-			// MPI_Irecv(&tempAlpha, 1, MPI_INT, MPI_ANY_SOURCE, NEW_ALPHA_TAG, MPI_COMM_WORLD, &alphaReq);
+			// Update and broadcast new globa alpha
+			MPI_Test(&alphaReq, &alphaReqFlag, MPI_STATUS_IGNORE);
+			if(alphaReqFlag) {
+				// printf("Received new alpha\n");
+				if(tempAlpha>bestAlpha) {
+					bestAlpha = tempAlpha;
+					// MPI_Ibcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
+				}
+				MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
+			}
 			// MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &boardCountReq);
 			// printf("Time taken: %lfs\n", timetaken);
 
 			MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
-			clock_gettime(CLOCK_MONOTONIC, &endtime);
+			clock_gettime(CLOCK_REALTIME, &endtime);
 		}
 
 		shouldStop = 1;
@@ -365,7 +374,7 @@ void masterProcess() {
 		bestMove = -1; numBoards = 1;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &endtime);
+	clock_gettime(CLOCK_REALTIME, &endtime);
 
 	printOutput(bestMove);	// Print output
 }
@@ -399,6 +408,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	// Receive initial alpha and beta from master
 	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
+	// MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
 
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
 		// Check if master has issued a termination order
@@ -408,6 +418,12 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 		// Safe to continue search for now
 		applyMove(brdcpy, board, legalMoves[i], COLOR);	// Apply given move to evaluate
 		scores[i-startMoveIdx] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, bestAlpha, MAXBETA);	// Evaluate subtree
+
+		// Update global alpha if possible
+		if(scores[i-startMoveIdx]>bestAlpha) {
+			bestAlpha = scores[i-startMoveIdx];
+			MPI_Isend(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
+		}
 	}
 
 	// Send scores and then help compute search statistics
