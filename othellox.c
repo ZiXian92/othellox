@@ -326,8 +326,6 @@ void masterProcess() {
 			recvcounts[i] = STARTMOVEIDX(i+1, numMoves, numProcs-1)-displs[i];
 		}
 		MPI_Igatherv(NULL, 0, MPI_DOUBLE, scores, recvcounts, displs, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
-		printf("Master waiting for scores\n");
-		MPI_Wait(&scoresReq, MPI_STATUS_IGNORE);
 
 		// TODO: Implement loop to receive and broadcast updated alpha values
 		// MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
@@ -349,7 +347,7 @@ void masterProcess() {
 		// MPI_Wait(&stopSigReq, MPI_STATUS_IGNORE);
 		// printf("Waiting for scores\n");
 		// MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
-		// if(!scoresReqFlag) { printf("scores not ready\n"); MPI_Wait(&scoresReq, MPI_STATUS_IGNORE);	} // Wait for all to send scores
+		MPI_Wait(&scoresReq, MPI_STATUS_IGNORE); // Wait for all to send scores
 		
 		// Here, all scores should be ready for processing.
 		// Process scores to get best move(s)
