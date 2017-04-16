@@ -43,7 +43,7 @@
 #define MAXBETA DBL_MAX
 #define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
 #define TIMEOUT_THRESH (TIMEOUT-1.5)
-#define BOARD_UPDATE_THRESH (100)
+#define BOARD_UPDATE_THRESH (MAXBOARDS/100)
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
