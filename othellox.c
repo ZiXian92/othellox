@@ -50,14 +50,15 @@
 // MPI Stuff
 #define NEW_ALPHA_TAG 0
 
-// struct OrderedMoves {
-// 	int corners[4], *edges, *others, nCorners, nEdges, nOthers;
-// };
+struct OrderedMoves {
+	int corners[4], *edges, *others, nCorners, nEdges, nOthers;
+};
 
 /* Function declarations */
-// int isCorner(const int move);
-// int isEdge(const int move);
-// void orderMoves(struct OrderedMoves *oMoves);
+int isCorner(const int move);
+int isEdge(const int move);
+void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len);
+int getNextMove(struct OrderedMoves *oMoves, int *move);
 double elapsedTime(struct timespec, struct timespec);
 int initBoard(char *boardfile, char *paramfile);
 void deinitBoard();
@@ -138,6 +139,46 @@ int main(int argc, char **argv) {
  	MPI_Finalize();
  	return 0;
  }
+
+// Checks if a move is a corner
+int isCorner(const int move) {
+	int r = ROW(POS(move)), c = COL(POS(move));
+	return (r==0 || r==R-1) && (c==0 || c==C-1);
+}
+
+// If a move is a corner, it is implicitly an edge
+int isEdge(const int move) {
+	int r = ROW(POS(move)), c = COL(POS(move));
+	return isCorner(move) || r==0 || r==R-1 || c==0 || c==C-1;
+}
+
+// Sort moves in terms of preferability
+void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len) {
+	int i;
+	if(!oMoves->edges) oMoves->edges = malloc((R+R+C+C-8)*sizeof(int));
+	if(!oMoves->others) oMoves->others = malloc((R-2)*(C-2)*sizeof(int));
+	oMoves->nCorners = oMoves->nEdges = oMoves->nOthers = 0;
+	for(i=0; i<len; i++) {
+		if(isCorner(moves[i])) oMoves->corners[oMoves->nCorners++] = moves[i];
+		else if(isEdge(moves[i])) oMoves->edges[oMoves->nEdges++] = moves[i];
+		else oMoves->others[oMoves->nOthers++] = moves[i];
+	}
+}
+
+// Gets next move. Returns 1 if there is a move left and 0 otherwise.
+// If 1 is returned, move is set to be the next move.
+int getNextMove(struct OrderedMoves *oMoves, int *move) {
+	if(oMoves->nCorners) {
+		*move = oMoves->corners[--oMoves->nCorners];
+		return 1;
+	} else if(oMoves->nEdges) {
+		*move = oMoves->edges[--oMoves->nEdges];
+		return 1;
+	} else if(oMoves->nOthers) {
+		*move = oMoves->others[--oMoves->nOthers];
+		return 1;
+	} else return 0;
+}
 
 // Returns a bitmap of valid directions. Value of 0 means no valid direction.
 // Assumes C<32.
