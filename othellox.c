@@ -511,7 +511,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	legalMoves = moveList[0];
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(double));	// Prepare holder for each move's score
-	brdcpy = malloc((R<<1)*sizeof(int));
+	brdcpy = boardcopies[MAXDEPTH];
 	memset(scores, 0, (endMoveIdx-startMoveIdx)*sizeof(double));
 
 	// Sort the moves by favourability
@@ -572,10 +572,9 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 	orderMoves(&orderedMoveList[depth], tempMoves, nextMove);
 	if(getNextMove(&orderedMoveList[depth], &nextMove)) {
 		// Grab 1st move since only evaluating 1 full path on master.
-		brdcpy = malloc((R<<1)*sizeof(int));
+		brdcpy = boardcopies[depth];
 		applyMove(brdcpy, brd, nextMove, color);
 		score = masteralphabeta(brdcpy, depth-1, !color, 0);
-		free(brdcpy);
 	} else if(!passed) score = masteralphabeta(brd, depth-1, !color, 1);	// Skip
 	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
 
@@ -602,7 +601,7 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
 	tempMoves = moveList[1];
-	brdcpy = malloc((R<<1)*sizeof(int));
+	brdcpy = boardcopies[depth];
 	nMoves = getLegalMoves(brd, color, tempMoves);
 
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
@@ -646,7 +645,6 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 		}
 	}
 
-	free(brdcpy);
 	return res;
 }
 
