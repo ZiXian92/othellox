@@ -527,7 +527,8 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 	MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
 	
-	for(i=startMoveIdx; i<endMoveIdx; i++) {
+	// Try the moves in descending preferability
+	do {
 		// Check if master has issued a termination order
 		MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
 		if(stopSigReqFlag) break;
@@ -540,7 +541,8 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 		}
 
 		// Safe to continue search for now
-		applyMove(brdcpy, board, legalMoves[i], COLOR);	// Apply given move to evaluate
+		applyMove(brdcpy, board, move, COLOR);	// Apply given move to evaluate
+		for(i=startMoveIdx; i<endMoveIdx; i++) if(legalMoves[i]==move) break;	// Find where to place the score
 		scores[i-startMoveIdx] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, bestAlpha, MAXBETA);	// Evaluate subtree
 
 		// Update global alpha if possible
@@ -548,7 +550,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 			bestAlpha = scores[i-startMoveIdx];
 			MPI_Isend(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
 		}
-	}
+	} while(getNextMove(&orderedMoveList[MAXDEPTH], &move));
 
 	// Send scores and then help compute search statistics
 	MPI_Igatherv(scores, endMoveIdx-startMoveIdx, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
