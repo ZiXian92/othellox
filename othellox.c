@@ -85,7 +85,7 @@ int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastRe
 MPI_Comm alphaChannel, stopChannel, alphabcastChannel, boardCountChannel;
 struct OrderedMoves *orderedMoveList;
 
-int **moveList;
+int **moveList, **boardcopies;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -117,12 +117,19 @@ int main(int argc, char **argv) {
  	// Failure handling makes the code too complicated and deviates away from
  	// developing program logic.
  	res = initBoard(argv[1], argv[2]);	// Initialize board
- 	// legalMoves = malloc(R*C*sizeof(int));
+
+ 	// Create a list of move list, 1 for each recursion depth.
+ 	// This is because there can only be at most 1 node in each depth being evaluated
+ 	// in the call stack at any time.
  	moveList = malloc(2*sizeof(int*));
  	for(i=0; i<2; i++) moveList[i] = malloc(R*C*sizeof(int));
- 	orderedMoveList = malloc((MAXDEPTH+1)*sizeof(struct OrderedMoves));
 
- 	// Initialize each ordered move object
+ 	// Create a list of board copies, similar to list of move lists.
+ 	boardcopies = malloc((MAXDEPTH+1)*sizeof(int*));
+ 	for(i=0; i<=MAXDEPTH; i++) boardcopies[i] = malloc(2*R*sizeof(int));
+
+ 	// Create and initialize list of ordered move list, similar to list of move lists.
+ 	orderedMoveList = malloc((MAXDEPTH+1)*sizeof(struct OrderedMoves));
  	for(i=0; i<=MAXDEPTH; i++) {
  		orderedMoveList[i].corners = malloc(4*sizeof(int));
  		orderedMoveList[i].edges = malloc((R+R+C+C-8)*sizeof(int));
@@ -147,8 +154,9 @@ int main(int argc, char **argv) {
  		if(orderedMoveList[i].corners) free(orderedMoveList[i].corners);
  		if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
  		if(orderedMoveList[i].others) free(orderedMoveList[i].others);
+ 		free(boardcopies[i]);
  	}
- 	free(moveList);	free(orderedMoveList);
+ 	free(moveList);	free(orderedMoveList); free(boardcopies);
  	deinitBoard();
 
  	MPI_Finalize();
