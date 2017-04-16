@@ -51,7 +51,7 @@
 #define NEW_ALPHA_TAG 0
 
 struct OrderedMoves {
-	int corners[4], *edges, *others, nCorners, nEdges, nOthers;
+	int *corners, *edges, *others, nCorners, nEdges, nOthers;
 };
 
 /* Function declarations */
@@ -95,6 +95,7 @@ int **moveList;
 
 int main(int argc, char **argv) {
  	int res, i;
+ 	struct OrderedMoves om;
 
  	// Make sure the input files are given
  	if(argc<3){
@@ -117,12 +118,20 @@ int main(int argc, char **argv) {
  	// developing program logic.
  	res = initBoard(argv[1], argv[2]);	// Initialize board
  	// legalMoves = malloc(R*C*sizeof(int));
- 	moveList = malloc((MAXDEPTH+1)*sizeof(int*));
- 	for(i=0; i<=MAXDEPTH; i++) moveList[i] = malloc(R*C*sizeof(int));
+ 	moveList = malloc(2*sizeof(int*));
+ 	for(i=0; i<2; i++) moveList[i] = malloc(R*C*sizeof(int));
  	orderedMoveList = malloc((MAXDEPTH+1)*sizeof(struct OrderedMoves));
 
+ 	// Initialize each ordered move object
+ 	for(i=0; i<=MAXDEPTH; i++) {
+ 		orderedMoveList[i].corners = malloc(4*sizeof(int));
+ 		orderedMoveList[i].edges = malloc((R+R+C+C-8)*sizeof(int));
+ 		orderedMoveList[i].others = malloc((R-2)*(C-2)*sizeof(int));
+ 		orderedMoveList[i].nCorners = orderedMoveList[i].nEdges = orderedMoveList[i].nOthers = 0;
+ 	}
+
  	// All compute valid first moves
- 	numMoves = getLegalMoves(board, COLOR, moveList[MAXDEPTH]);
+ 	numMoves = getLegalMoves(board, COLOR, moveList[0]);
 
  	// Master process, compute 1 branch to get alpha beta bounds
  	// to help slaves with cut-off
@@ -133,13 +142,12 @@ int main(int argc, char **argv) {
  	}
 
  	// Cleanup
- 	for(i=0; i<=MAXDEPTH; i++) free(moveList[i]);
- 	for(i=0; i<=MAXDEPTH; i++) {
- 		if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
- 		if(orderedMoveList[i].others) free(orderedMoveList[i].others);
- 	}
+ 	for(i=0; i<2; i++) free(moveList[i]);
+ 	// for(i=0; i<=MAXDEPTH; i++) {
+ 	// 	if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
+ 	// 	if(orderedMoveList[i].others) free(orderedMoveList[i].others);
+ 	// }
  	free(moveList);	free(orderedMoveList);
- 	// free(legalMoves);
  	deinitBoard();
 
  	MPI_Finalize();
@@ -161,8 +169,6 @@ int isEdge(const int move) {
 // Sort moves in terms of preferability
 void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len) {
 	int i;
-	if(!oMoves->edges) oMoves->edges = malloc((R+R+C+C-8)*sizeof(int));
-	if(!oMoves->others) oMoves->others = malloc((R-2)*(C-2)*sizeof(int));
 	oMoves->nCorners = oMoves->nEdges = oMoves->nOthers = 0;
 	for(i=0; i<len; i++) {
 		if(isCorner(moves[i])) oMoves->corners[oMoves->nCorners++] = moves[i];
@@ -380,12 +386,12 @@ void masterProcess() {
 
 		// Find initial alpha and beta values and broadcast to all slaves
 		// in hope of faster pruning.
-		// bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
-
 		// Get the max initial alpha from slaves, then broadcast it
 		bestAlpha = MINALPHA;
 		MPI_Scan(&bestAlpha, &bestAlpha, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
+
+		// Prepare to receive board count and updated alpha
 		MPI_Iscan(&numBoards, &totalBoards, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, boardCountChannel, &boardCountReq);
 		MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
 
@@ -423,14 +429,13 @@ void masterProcess() {
 		shouldStop = 1;
 
 		// Time threshold exceeded, tell everyone to stop
-		// printf("preparing to terminate\n");
 		MPI_Ibcast(&shouldStop, 1, MPI_INT, MASTER_PID, stopChannel, &stopSigReq);
 		MPI_Wait(&scoresReq, MPI_STATUS_IGNORE); // Wait for all to send scores
 		
 		// Here, all scores should be ready for processing.
 		// Process scores to get best move(s)
 		// for(i=0; i<numMoves; i++) printf(" %lf", scores[i]); printf("\n");
-		bestScore = MINALPHA; bestMove = -1; legalMoves = moveList[MAXDEPTH];
+		bestScore = MINALPHA; bestMove = -1; legalMoves = moveList[0];
 		for(i=0; i<numMoves; i++) if(bestScore<scores[i]) { bestScore = scores[i]; bestMove = legalMoves[i]; }
 
 		// Gather other statistics
@@ -451,7 +456,7 @@ void masterProcess() {
 
 // Work done by each slave
 void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
-	int i, *brdcpy;
+	int i, *brdcpy, move;
 
 	numBoards = totalBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0; dummy = 0;
 
@@ -495,13 +500,17 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 		return;
 	}
 
-	legalMoves = moveList[MAXDEPTH];
+	legalMoves = moveList[0];
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(double));	// Prepare holder for each move's score
 	brdcpy = malloc((R<<1)*sizeof(int));
 	memset(scores, 0, (endMoveIdx-startMoveIdx)*sizeof(double));
 
+	// Sort the moves by favourability
+	orderMoves(&orderedMoveList[MAXDEPTH], legalMoves+startMoveIdx, endMoveIdx-startMoveIdx);
+	getNextMove(&orderedMoveList[MAXDEPTH], &move);
+
 	// Do master alphabeta to get a good alpha from the start
-	applyMove(brdcpy, board, legalMoves[startMoveIdx], COLOR);
+	applyMove(brdcpy, board, move, COLOR);
 	bestAlpha = masteralphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0);
 	MPI_Scan(&bestAlpha, &bestAlpha, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
@@ -549,11 +558,12 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node: not specified to go deeper!
 
-	tempMoves = moveList[depth];
+	tempMoves = moveList[1];
 	nextMove = getLegalMoves(brd, color, tempMoves);	// Get a feasible move. Recycling nextMove to count legal moves.
-	if(nextMove) {
+	orderMoves(&orderedMoveList[depth], tempMoves, nextMove);
+	if(getNextMove(&orderedMoveList[depth], &nextMove)) {
 		// Grab 1st move since only evaluating 1 full path on master.
-		nextMove = tempMoves[0]; brdcpy = malloc((R<<1)*sizeof(int));
+		brdcpy = malloc((R<<1)*sizeof(int));
 		applyMove(brdcpy, brd, nextMove, color);
 		score = masteralphabeta(brdcpy, depth-1, !color, 0);
 		free(brdcpy);
@@ -565,7 +575,7 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 
 // This is actually done on slaves
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
-	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
+	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR, move;
 	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
 
@@ -582,45 +592,49 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
-	tempMoves = moveList[depth];
+	tempMoves = moveList[1];
 	brdcpy = malloc((R<<1)*sizeof(int));
 	nMoves = getLegalMoves(brd, color, tempMoves);
 
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
 	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
-	else for(i=0; i<nMoves; i++) {
-		// Check if master has issued a termination order
-		MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
-		if(stopSigReqFlag) break;
+	else {
+		// Sort the moves first
+		orderMoves(&orderedMoveList[depth], tempMoves, nMoves);
+		while(getNextMove(&orderedMoveList[depth], &move)) {
+			// Check if master has issued a termination order
+			MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
+			if(stopSigReqFlag) break;
 
-		// Check for updated alpha
-		MPI_Test(&alphabcastReq, &alphabcastReqFlag, MPI_STATUS_IGNORE);
-		if(alphabcastReqFlag) {
-			bestAlpha = MAX(bestAlpha, tempAlpha);
+			// Check for updated alpha
+			MPI_Test(&alphabcastReq, &alphabcastReqFlag, MPI_STATUS_IGNORE);
+			if(alphabcastReqFlag) {
+				bestAlpha = MAX(bestAlpha, tempAlpha);
+				alpha = MAX(alpha, bestAlpha);
+				MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
+			}
+
+			applyMove(brdcpy, brd, move, color);
+			score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
+			if(isMaxPlayer) {
+				res = MAX(res, score);
+				alpha = MAX(alpha, res);
+			} else {
+				res = MIN(res, score);
+				beta = MIN(beta, res);
+			}
+
+			// Check for updated alpha
+			// Might be quite a while between previous check and this check
+			// Even if child call updates bestAlpha, this alpha is not updated
+			MPI_Test(&alphabcastReq, &alphabcastReqFlag, MPI_STATUS_IGNORE);
+			if(alphabcastReqFlag) {
+				bestAlpha = MAX(bestAlpha, tempAlpha);
+				MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
+			}
 			alpha = MAX(alpha, bestAlpha);
-			MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
+			if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
 		}
-
-		applyMove(brdcpy, brd, tempMoves[i], color);
-		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
-		if(isMaxPlayer) {
-			res = MAX(res, score);
-			alpha = MAX(alpha, res);
-		} else {
-			res = MIN(res, score);
-			beta = MIN(beta, res);
-		}
-
-		// Check for updated alpha
-		// Might be quite a while between previous check and this check
-		// Even if child call updates bestAlpha, this alpha is not updated
-		MPI_Test(&alphabcastReq, &alphabcastReqFlag, MPI_STATUS_IGNORE);
-		if(alphabcastReqFlag) {
-			bestAlpha = MAX(bestAlpha, tempAlpha);
-			MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
-		}
-		alpha = MAX(alpha, bestAlpha);
-		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
 	}
 
 	free(brdcpy);
