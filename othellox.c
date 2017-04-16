@@ -50,7 +50,14 @@
 // MPI Stuff
 #define NEW_ALPHA_TAG 0
 
+// struct OrderedMoves {
+// 	int corners[4], *edges, *others, nCorners, nEdges, nOthers;
+// };
+
 /* Function declarations */
+// int isCorner(const int move);
+// int isEdge(const int move);
+// void orderMoves(struct OrderedMoves *oMoves);
 double elapsedTime(struct timespec, struct timespec);
 int initBoard(char *boardfile, char *paramfile);
 void deinitBoard();
@@ -326,7 +333,11 @@ void masterProcess() {
 
 		// Find initial alpha and beta values and broadcast to all slaves
 		// in hope of faster pruning.
-		bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
+		// bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
+
+		// Get the max initial alpha from slaves, then broadcast it
+		bestAlpha = MINALPHA;
+		MPI_Scan(&bestAlpha, &bestAlpha, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 		MPI_Iscan(&numBoards, &totalBoards, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, boardCountChannel, &boardCountReq);
 		MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
@@ -407,6 +418,9 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	// Won't be doing any subtree searching...
 	if(startMoveIdx>=endMoveIdx) {
+		bestAlpha = MINALPHA;
+		MPI_Scan(&bestAlpha, &bestAlpha, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
 		// Not involved in actual work but still need to receive bcast.
 		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 		MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
@@ -434,16 +448,20 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 		return;
 	}
 
+	legalMoves = moveList[MAXDEPTH];
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(double));	// Prepare holder for each move's score
 	brdcpy = malloc((R<<1)*sizeof(int));
 	memset(scores, 0, (endMoveIdx-startMoveIdx)*sizeof(double));
 
+	// Do master alphabeta to get a good alpha from the start
+	applyMove(brdcpy, board, legalMoves[startMoveIdx], COLOR);
+	bestAlpha = masteralphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0);
+	MPI_Scan(&bestAlpha, &bestAlpha, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
 	// Receive initial alpha and beta from master
 	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
 	MPI_Ibcast(&tempAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
-
-	legalMoves = moveList[MAXDEPTH];
-
+	
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
 		// Check if master has issued a termination order
 		MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
