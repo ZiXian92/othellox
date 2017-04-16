@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <time.h>
 
 // 6144 bytes should be able to capture the largest of solvable boards like 26x26.
@@ -41,12 +40,21 @@
 #define BLACK 1
 #define MINALPHA (-DBL_MAX)
 #define MAXBETA DBL_MAX
+#define TIMEOUT_THRESH (TIMEOUT-1)
 #define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
+struct OrderedMoves {
+	int *corners, *edges, *others, nCorners, nEdges, nOthers;
+};
+
 /* Function declarations */
-double elapsedTime(struct timeval, struct timeval);
+int isCorner(const int move);
+int isEdge(const int move);
+void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len);
+int getNextMove(struct OrderedMoves *oMoves, int *move);
+double elapsedTime(struct timespec, struct timespec);
 int initBoard(char *boardfile, char *paramfile);
 void deinitBoard();
 void printBoard(int brd[const]);
@@ -55,14 +63,18 @@ void applyMove(int destbrd[], int srcbrd[const], const int move, const int color
 int isLegalMove(int brd[const], const int pos, const int color);
 int getLegalMoves(int brd[const], const int color, int moves[]);
 double evaluateBoard(int brd[const]);
+double masteralphabeta(int brd[const], const int depth, const int color, const int passed);
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta);
 /* End function declarations */
 
-int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves;
+int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numMoves;
 double bestAlpha, tempAlpha, *scores;
-int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
+int MAXDEPTH, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
+unsigned long long MAXBOARDS, numBoards;
 int *board, bestMove, *legalMoves;
-struct timeval starttime, endtime;
+struct timespec starttime, endtime;
+struct OrderedMoves *orderedMoveList;
+int **moveList, **boardcopies;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -80,13 +92,33 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	gettimeofday(&starttime, NULL);
+	clock_gettime(CLOCK_REALTIME, &starttime);
 
  	// Here, assume all operations are successful.
  	// Failure handling makes the code too complicated and deviates away from
  	// developing program logic.
  	res = initBoard(argv[1], argv[2]);	// Initialize board
- 	legalMoves = malloc(R*C*sizeof(int));
+
+ 	// Create a list of move list, 1 for each recursion depth.
+ 	// This is because there can only be at most 1 node in each depth being evaluated
+ 	// in the call stack at any time.
+ 	moveList = malloc(2*sizeof(int*));
+ 	for(i=0; i<2; i++) moveList[i] = malloc(R*C*sizeof(int));
+
+ 	// Create a list of board copies, similar to list of move lists.
+ 	boardcopies = malloc((MAXDEPTH+1)*sizeof(int*));
+ 	for(i=0; i<=MAXDEPTH; i++) boardcopies[i] = malloc(2*R*sizeof(int));
+
+ 	// Create and initialize list of ordered move list, similar to list of move lists.
+ 	orderedMoveList = malloc((MAXDEPTH+1)*sizeof(struct OrderedMoves));
+ 	for(i=0; i<=MAXDEPTH; i++) {
+ 		orderedMoveList[i].corners = malloc(4*sizeof(int));
+ 		orderedMoveList[i].edges = malloc((R+R+C+C-8)*sizeof(int));
+ 		orderedMoveList[i].others = malloc((R-2)*(C-2)*sizeof(int));
+ 		orderedMoveList[i].nCorners = orderedMoveList[i].nEdges = orderedMoveList[i].nOthers = 0;
+ 	}
+
+ 	legalMoves = moveList[0];
 
  	// All compute valid first moves
  	numMoves = getLegalMoves(board, COLOR, legalMoves);
@@ -94,7 +126,9 @@ int main(int argc, char **argv) {
  	if(numMoves){
  		scores = malloc(numMoves*sizeof(double));
  		bestScore = MINALPHA; bestMove = -1;
- 		brdcpy = malloc(R*2*sizeof(int));
+ 		brdcpy = boardcopies[MAXDEPTH];
+ 		orderMoves(&orderedMoveList[MAXDEPTH], legalMoves, numMoves);
+
  		for(i=0; i<numMoves; i++) {
  			applyMove(brdcpy, board, legalMoves[i], COLOR);
  			scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, MINALPHA, MAXBETA);
@@ -106,16 +140,61 @@ int main(int argc, char **argv) {
 		bestMove = -1; numBoards = 1;
 	}
 
-	gettimeofday(&endtime, NULL);
+	clock_gettime(CLOCK_REALTIME, &endtime);
 
 	printOutput(bestMove);
 
  	// Cleanup
- 	free(legalMoves);
+ 	for(i=0; i<2; i++) free(moveList[i]);
+ 	for(i=0; i<=MAXDEPTH; i++) {
+ 		if(orderedMoveList[i].corners) free(orderedMoveList[i].corners);
+ 		if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
+ 		if(orderedMoveList[i].others) free(orderedMoveList[i].others);
+ 		free(boardcopies[i]);
+ 	}
+ 	free(moveList);	free(orderedMoveList); free(boardcopies);
  	deinitBoard();
 
  	return 0;
  }
+
+// Checks if a move is a corner
+int isCorner(const int move) {
+	int r = ROW(POS(move)), c = COL(POS(move));
+	return (r==0 || r==R-1) && (c==0 || c==C-1);
+}
+
+// If a move is a corner, it is implicitly an edge
+int isEdge(const int move) {
+	int r = ROW(POS(move)), c = COL(POS(move));
+	return isCorner(move) || r==0 || r==R-1 || c==0 || c==C-1;
+}
+
+// Sort moves in terms of preferability
+void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len) {
+	int i;
+	oMoves->nCorners = oMoves->nEdges = oMoves->nOthers = 0;
+	for(i=0; i<len; i++) {
+		if(isCorner(moves[i])) oMoves->corners[oMoves->nCorners++] = moves[i];
+		else if(isEdge(moves[i])) oMoves->edges[oMoves->nEdges++] = moves[i];
+		else oMoves->others[oMoves->nOthers++] = moves[i];
+	}
+}
+
+// Gets next move. Returns 1 if there is a move left and 0 otherwise.
+// If 1 is returned, move is set to be the next move.
+int getNextMove(struct OrderedMoves *oMoves, int *move) {
+	if(oMoves->nCorners) {
+		*move = oMoves->corners[--oMoves->nCorners];
+		return 1;
+	} else if(oMoves->nEdges) {
+		*move = oMoves->edges[--oMoves->nEdges];
+		return 1;
+	} else if(oMoves->nOthers) {
+		*move = oMoves->others[--oMoves->nOthers];
+		return 1;
+	} else return 0;
+}
 
 // Returns a bitmap of valid directions. Value of 0 means no valid direction.
 // Assumes C<32.
@@ -297,36 +376,61 @@ double evaluateBoard(int brd[const]) {
 	return score;
 }
 
+double masteralphabeta(int brd[const], const int depth, const int color, const int passed) {
+	int shouldMaximise = color==COLOR, nextMove, *brdcpy, *tempMoves;
+	double score = 0;
+	lowestDepth = MIN(lowestDepth, depth); numBoards++;
+
+	if(!depth) return evaluateBoard(brd);	// Leaf node: not specified to go deeper!
+
+	tempMoves = moveList[1];
+	nextMove = getLegalMoves(brd, color, tempMoves);	// Get a feasible move. Recycling nextMove to count legal moves.
+	orderMoves(&orderedMoveList[depth], tempMoves, nextMove);
+	if(getNextMove(&orderedMoveList[depth], &nextMove)) {
+		// Grab 1st move since only evaluating 1 full path on master.
+		brdcpy = boardcopies[depth];
+		applyMove(brdcpy, brd, nextMove, color);
+		score = masteralphabeta(brdcpy, depth-1, !color, 0);
+	} else if(!passed) score = masteralphabeta(brd, depth-1, !color, 1);	// Skip
+	else score = evaluateBoard(brd);	// Previous and current user cannot make a move. Endgame.
+
+	return score;
+}
+
 // This is actually done on slaves
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
-	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
+	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR, move;
 	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
 	if(numBoards>=MAXBOARDS) return evaluateBoard(brd);
 
 	if(!depth) return evaluateBoard(brd);	// Leaf node
 
-	tempMoves = malloc(R*C*sizeof(int));
-	brdcpy = malloc((R<<1)*sizeof(int));
+	tempMoves = moveList[1];
+	brdcpy = boardcopies[depth];
 	nMoves = getLegalMoves(brd, color, tempMoves);
 
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
 	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
-	else for(i=0; i<nMoves; i++) {
-		applyMove(brdcpy, brd, tempMoves[i], color);
-		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
-		if(isMaxPlayer) {
-			res = MAX(res, score);
-			alpha = MAX(alpha, res);
-		} else {
-			res = MIN(res, score);
-			beta = MIN(beta, res);
+	else {
+		orderMoves(&orderedMoveList[depth], tempMoves, nMoves);
+		while(getNextMove(&orderedMoveList[depth], &move)) {
+			// Check for timeout
+			clock_gettime(CLOCK_REALTIME, &endtime);
+			if(elapsedTime(starttime, endtime)>=TIMEOUT_THRESH) break;
+			applyMove(brdcpy, brd, move, color);
+			score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
+			if(isMaxPlayer) {
+				res = MAX(res, score);
+				alpha = MAX(alpha, res);
+			} else {
+				res = MIN(res, score);
+				beta = MIN(beta, res);
+			}
+			if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
+			if(numBoards>=MAXBOARDS) { pruned|=(i+1<nMoves); break; }
 		}
-		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
-		if(numBoards>=MAXBOARDS) { pruned|=(i+1<nMoves); break; }
 	}
-
-	free(tempMoves); free(brdcpy);
 
 	return res;
 }
@@ -347,11 +451,11 @@ void printOutput(const int bestMove) {
 	printf("Elapsed time in seconds: %lf\n", elapsedTime(starttime, endtime));
 }
 
-// Returns elpased time in millseconds
-double elapsedTime(struct timeval start, struct timeval end) {
+// Returns elpased time in seconds
+double elapsedTime(struct timespec start, struct timespec end) {
 	double timetaken = end.tv_sec-start.tv_sec;
-	if(end.tv_usec<start.tv_usec) { timetaken-=1; end.tv_usec+=1000000; }
-	return timetaken+(end.tv_usec-start.tv_usec)/1000000.0;
+	if(end.tv_nsec<start.tv_nsec) { timetaken-=1; end.tv_nsec+=1000000000; }
+	return timetaken+(end.tv_nsec-start.tv_nsec)/1000000000.0;
 }
 
 int initBoard(char *boardfile, char *paramfile) {
@@ -363,9 +467,10 @@ int initBoard(char *boardfile, char *paramfile) {
 	while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
 	ptok = strtok(buf+6, ",");
 	while(ptok!=NULL){
-		if(C==-1) C = atoi(ptok);
-		else if(R==-1) R = atoi(ptok);
+		if(R==-1) R = atoi(ptok);
+		else if(C==-1) C = atoi(ptok);
 		else break;
+		ptok = strtok(NULL, ",");
 	}
 	board = malloc(R*2*sizeof(int));
 	memset(board, 0, R*2*sizeof(int));
@@ -407,7 +512,7 @@ int initBoard(char *boardfile, char *paramfile) {
 	// Read max boards
 	fgets(buf, 1024, evalfile); len = strlen(buf)-1;
 	while(len>=0 && !isdigit(buf[len])) buf[len--] = 0;
-	MAXBOARDS = atoi(buf+11);
+	MAXBOARDS = atol(buf+11);
 
 	// Read corner value
 	fgets(buf, 1024, evalfile); len = strlen(buf)-1;
