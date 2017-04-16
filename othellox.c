@@ -83,6 +83,7 @@ struct timespec starttime, endtime;
 MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq, alphabcastReq, boardCountReq;
 int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastReqFlag, boardCountReqFlag;
 MPI_Comm alphaChannel, stopChannel, alphabcastChannel, boardCountChannel;
+struct OrderedMoves *orderedMoveList;
 
 int **moveList;
 
@@ -118,6 +119,7 @@ int main(int argc, char **argv) {
  	// legalMoves = malloc(R*C*sizeof(int));
  	moveList = malloc((MAXDEPTH+1)*sizeof(int*));
  	for(i=0; i<=MAXDEPTH; i++) moveList[i] = malloc(R*C*sizeof(int));
+ 	orderedMoveList = malloc((MAXDEPTH+1)*sizeof(struct OrderedMoves));
 
  	// All compute valid first moves
  	numMoves = getLegalMoves(board, COLOR, moveList[MAXDEPTH]);
@@ -132,7 +134,11 @@ int main(int argc, char **argv) {
 
  	// Cleanup
  	for(i=0; i<=MAXDEPTH; i++) free(moveList[i]);
- 	free(moveList);
+ 	for(i=0; i<=MAXDEPTH; i++) {
+ 		if(orderedMoveList[i].edges) free(orderedMoveList[i].edges);
+ 		if(orderedMoveList[i].others) free(orderedMoveList[i].others);
+ 	}
+ 	free(moveList);	free(orderedMoveList);
  	// free(legalMoves);
  	deinitBoard();
 
