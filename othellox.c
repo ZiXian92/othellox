@@ -400,10 +400,13 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
 	MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 
-	// Standby so that working slaves can end on time
-	MPI_Igatherv(NULL, 0, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
-
 	if(startMoveIdx>=endMoveIdx) {
+		// Not involved in actual work but still need to receive bcast.
+		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel);
+
+		// Standby so that working slaves can end on time
+		MPI_Igatherv(NULL, 0, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
+
 		while(!stopSigReqFlag) {
 			// MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &boardCountReq);
 
@@ -448,7 +451,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	// Send scores and then help compute search statistics
 	MPI_Igatherv(scores, endMoveIdx-startMoveIdx, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
-	MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
+	// MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 	MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 	MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
@@ -571,9 +574,10 @@ int initBoard(char *boardfile, char *paramfile) {
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;	// Erase non-alnum characters
  	ptok = strtok(start, ",");
  	while(ptok!=NULL) {
-		if(C==-1) C = atoi(ptok);
-		else if(R==-1) R = atoi(ptok);
+		if(R==-1) R = atoi(ptok);
+		else if(C==-1) C = atoi(ptok);
 		else break;
+		ptok = strtok(NULL, ",");
 	}
 	board = malloc(R*2*sizeof(int)); memset(board, 0, R*2*sizeof(int));
 
