@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// #include <sys/time.h>
 #include <time.h>
 
 // 6144 bytes should be able to capture the largest of solvable boards like 26x26.
@@ -43,8 +42,12 @@
 #define MINALPHA (-DBL_MAX)
 #define MAXBETA DBL_MAX
 #define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
+#define TIMEOUT_THRESH (TIMEOUT-1)
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
+
+// MPI Stuff
+#define NEW_ALPHA_TAG 0
 
 /* Function declarations */
 double elapsedTime(struct timespec, struct timespec);
@@ -62,11 +65,14 @@ void masterProcess();
 void slaveProcess(const int startMoveIdx, const int endMoveIdx);	// Processes legalMoves[startMoveIdx..(endMoveIdx-1)]
 /* End function declarations */
 
-int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves;
-double bestAlpha, tempAlpha, *scores;
+int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves, totalBoards;
+double bestAlpha, tempAlpha, *scores, timetaken;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
 int *board, bestMove, *legalMoves, shouldStop;
 struct timespec starttime, endtime;
+MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq;
+int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag;
+MPI_Comm alphaChannel;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -88,6 +94,7 @@ int main(int argc, char **argv) {
  	MPI_Init(&argc, &argv);
  	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
  	MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
+ 	MPI_Comm_dup(MPI_COMM_WORLD, &alphaChannel);
 
  	// Here, assume all operations are successful.
  	// Failure handling makes the code too complicated and deviates away from
@@ -301,7 +308,7 @@ void masterProcess() {
 	int *recvcounts = malloc(numProcs*sizeof(int)), *displs = malloc(numProcs*sizeof(int)), i;
 	double bestScore;
 
-	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
+	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
 
 	if(numMoves) {
 		scores = malloc(numMoves*sizeof(double));
@@ -309,21 +316,44 @@ void masterProcess() {
 		// Find initial alpha and beta values and broadcast to all slaves
 		// in hope of faster pruning.
 		bestAlpha = masteralphabeta(board, MAXDEPTH, COLOR, 0);
-		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD);
+		MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphaChannel);
 
-		// TODO: Implement loop to receive and broadcast updated alpha values
-
+		// Leave a request open to gather best results for all legal moves
 		// Compute how many scores to receive from each slave
 		recvcounts[numProcs-1] = displs[numProcs-1] = 0;
 		for(i=0; i<numProcs-1; i++) {
 			displs[i] = STARTMOVEIDX(i, numMoves, numProcs-1);
 			recvcounts[i] = STARTMOVEIDX(i+1, numMoves, numProcs-1)-displs[i];
 		}
+		MPI_Igatherv(NULL, 0, MPI_DOUBLE, scores, recvcounts, displs, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
+		printf("Master waiting for scores\n");
+		MPI_Wait(&scoresReq, MPI_STATUS_IGNORE);
 
-		// Gather best results for all legal moves
-		MPI_Gatherv(NULL, 0, MPI_DOUBLE, scores, recvcounts, displs, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD);
+		// TODO: Implement loop to receive and broadcast updated alpha values
+		// MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
+		// clock_gettime(CLOCK_MONOTONIC, &endtime);
+		// while(!scoresReqFlag && (timetaken = elapsedTime(starttime, endtime))<TIMEOUT_THRESH) {
+		// 	// MPI_Irecv(&tempAlpha, 1, MPI_INT, MPI_ANY_SOURCE, NEW_ALPHA_TAG, MPI_COMM_WORLD, &alphaReq);
+		// 	// MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &boardCountReq);
+		// 	// printf("Time taken: %lfs\n", timetaken);
 
+		// 	MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
+		// 	clock_gettime(CLOCK_MONOTONIC, &endtime);
+		// }
+
+		// shouldStop = 1;
+
+		// Time threshold exceeded, tell everyone to stop
+		// printf("Sending stop order\n");
+		// MPI_Ibcast(&shouldStop, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD, &stopSigReq);
+		// MPI_Wait(&stopSigReq, MPI_STATUS_IGNORE);
+		// printf("Waiting for scores\n");
+		// MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
+		// if(!scoresReqFlag) { printf("scores not ready\n"); MPI_Wait(&scoresReq, MPI_STATUS_IGNORE);	} // Wait for all to send scores
+		
+		// Here, all scores should be ready for processing.
 		// Process scores to get best move(s)
+		// MPI_Gatherv(NULL, 0, MPI_DOUBLE, scores, recvcounts, displs, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD);
 		// for(i=0; i<numMoves; i++) printf(" %lf", scores[i]); printf("\n");
 		bestScore = MINALPHA; bestMove = -1;
 		// printf("Init bestScore: %lf\n", MINALPHA);
@@ -349,9 +379,22 @@ void masterProcess() {
 void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	int i, *brdcpy;
 
-	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0;
+	numBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
+
+	// Open a channel to receive stop signal.
+	// MPI_Ibcast(&shouldStop, 1, MPI_INT, MASTER_PID, MPI_COMM_WORLD, &stopSigReq);
+	// MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
 
 	if(startMoveIdx>=endMoveIdx) {
+		// while(!stopSigReqFlag) {
+		// 	// MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &boardCountReq);
+		// 	// printf("Idle slave %d waiting for termination signal\n");
+		// 	MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
+		// }
+
+		// MPI_Wait(&stopSigReq, MPI_STATUS_IGNORE);
+
+		MPI_Igatherv(NULL, 0, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
 		MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 		MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 		MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
@@ -360,17 +403,27 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	scores = malloc((endMoveIdx-startMoveIdx)*sizeof(double));	// Prepare holder for each move's score
 	brdcpy = malloc((R<<1)*sizeof(int));
+	memset(scores, 0, (endMoveIdx-startMoveIdx)*sizeof(double));
 
 	// Receive initial alpha and beta from master
-	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD);
+	MPI_Bcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphaChannel);
 
+	// printf("Slave %d starting work\n", pid);
 	for(i=startMoveIdx; i<endMoveIdx; i++) {
+		// Check if master has issued a termination order
+		// MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
+		// if(stopSigReqFlag) {
+		// 	printf("Quitting\n");
+		// 	break;
+		// }
+
+		// Safe to continue search for now
 		applyMove(brdcpy, board, legalMoves[i], COLOR);	// Apply given move to evaluate
 		scores[i-startMoveIdx] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, bestAlpha, MAXBETA);	// Evaluate subtree
 	}
 
 	// Send scores and then help compute search statistics
-	MPI_Gatherv(scores, endMoveIdx-startMoveIdx, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD);
+	MPI_Igatherv(scores, endMoveIdx-startMoveIdx, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
 	MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 	MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
@@ -401,7 +454,6 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 }
 
 // This is actually done on slaves
-// TODO: Implement
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
 	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR;
 	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
@@ -416,8 +468,16 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 	if(!nMoves && passed) res = evaluateBoard(brd);	// End game
 	else if(!nMoves) res = alphabeta(brd, depth-1, !color, 1, alpha, beta);
 	else for(i=0; i<nMoves; i++) {
-		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
+		// Check if master has issued a termination order
+		// MPI_Test(&stopSigReq, &stopSigReqFlag, MPI_STATUS_IGNORE);
+		// // printf("%d\n", stopSigReqFlag);
+		// if(stopSigReqFlag) {
+		// 	printf("Stop order received\n");
+		// 	break;
+		// }
+
 		applyMove(brdcpy, brd, tempMoves[i], color);
+		score = alphabeta(brdcpy, depth-1, !color, 0, alpha, beta);
 		if(isMaxPlayer) {
 			res = MAX(res, score);
 			alpha = MAX(alpha, res);
@@ -427,6 +487,8 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 		}
 		if(beta<=alpha) { pruned|=(i+1<nMoves); break; }
 	}
+
+	// if(stopSigReqFlag) printf("Stopping\n");
 
 	free(tempMoves); free(brdcpy);
 	return res;
