@@ -69,7 +69,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx);	// Processes le
 int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numBoards, numMoves, totalBoards;
 double bestAlpha, tempAlpha, *scores, timetaken;
 int MAXDEPTH, MAXBOARDS, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
-int *board, bestMove, *legalMoves, shouldStop;
+int *board, bestMove, *legalMoves, shouldStop, dummy;
 struct timespec starttime, endtime;
 MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq, alphabcastReq, boardCountReq;
 int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastReqFlag, boardCountReqFlag;
@@ -351,7 +351,7 @@ void masterProcess() {
 			// printf("Time taken: %lfs\n", timetaken);
 
 			// Check board counts
-			if(boardCountReqFlag) MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
+			if(boardCountReqFlag) MPI_Iscan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
 			MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 			MPI_Test(&scoresReq, &scoresReqFlag, MPI_STATUS_IGNORE);
 			clock_gettime(CLOCK_REALTIME, &endtime);
@@ -371,7 +371,7 @@ void masterProcess() {
 		for(i=0; i<numMoves; i++) if(bestScore<scores[i]) { bestScore = scores[i]; bestMove = legalMoves[i]; }
 
 		// Gather other statistics
-		MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Scan(&numBoards, &totalBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 		MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 		MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 
@@ -390,7 +390,7 @@ void masterProcess() {
 void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 	int i, *brdcpy;
 
-	numBoards = totalBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0;
+	numBoards = totalBoards = 0; lowestDepth = MAXDEPTH; pruned = 0; shouldStop = 0; dummy = 0;
 
 	// Open a channel to receive stop signal.
 	MPI_Ibcast(&shouldStop, 1, MPI_INT, MASTER_PID, stopChannel, &stopSigReq);
@@ -442,6 +442,7 @@ void slaveProcess(const int startMoveIdx, const int endMoveIdx) {
 
 	// Send scores and then help compute search statistics
 	MPI_Igatherv(scores, endMoveIdx-startMoveIdx, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, MASTER_PID, MPI_COMM_WORLD, &scoresReq);
+	MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 	MPI_Scan(&numBoards, &numBoards, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Scan(&pruned, &pruned, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 	MPI_Scan(&lowestDepth, &lowestDepth, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
@@ -478,11 +479,12 @@ double alphabeta(int brd[const], const int depth, const int color, const int pas
 	numBoards++; lowestDepth = MIN(lowestDepth, depth);
 
 	// Update global board count
-	if(numBoards>=BOARD_UPDATE_THRESH) {
+	if(numBoards/BOARD_UPDATE_THRESH > dummy) {
 		MPI_Test(&boardCountReq, &boardCountReqFlag, MPI_STATUS_IGNORE);
 		// Hope that Iscan won't take too long to complete
-		if(boardCountReqFlag) {
-			totalBoards = numBoards; numBoards = 0;
+		if(boardCountReqFlag) {	// Ok to send gather
+			totalBoards = numBoards;
+			dummy = numBoards/BOARD_UPDATE_THRESH;
 			MPI_Iscan(&totalBoards, &totalBoards, 1, MPI_INT, MPI_SUM, boardCountChannel, &boardCountReq);
 		}
 	}
@@ -526,7 +528,7 @@ void printOutput(const int bestMove) {
 		printf("%c%d", c, r);
 	}
 	printf(" }\n");
-	printf("Number of boards assessed: %llu\n", numBoards);
+	printf("Number of boards assessed: %llu\n", totalBoards);
 	printf("Depth of boards: %d\n", MAXDEPTH-lowestDepth);
 	printf("Entire space: "); printf(pruned? "false\n": "true\n");
 	printf("Elapsed time in seconds: %lf\n", elapsedTime(starttime, endtime));
