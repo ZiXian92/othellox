@@ -713,7 +713,7 @@ int initBoard(char *boardfile, char *paramfile) {
  	}
 
  	// Read numColumns and numRows
- 	start = buf+6; cur = strchr(start, '\n');	// 1st line is Size: C,R
+ 	start = buf+6; cur = strchr(start, '\n');	// 1st line is Size: R,C
  	for(ptok=cur; !isalnum(*ptok) && ptok>=start; ptok--) *ptok = 0;	// Erase non-alnum characters
  	ptok = strtok(start, ",");
  	while(ptok!=NULL) {
