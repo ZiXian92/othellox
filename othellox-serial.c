@@ -1,3 +1,8 @@
+/* othellox-serial.c Serial version of Othellox program
+ * Matric. No.: A0110781N
+ * Name: Qua Zi Xian
+ */
+
 #include <ctype.h>
 #include <float.h>
 #include <math.h>
@@ -35,13 +40,14 @@
 #define DIRMASK(move) ((move)&((1<<DIRBITS)-1))
 #define ENCODEMOVE(pos, dirs) (((pos)<<DIRBITS)|(dirs))
 
-#define MASTER_PID (numProcs-1)
+// Game-related constants
 #define WHITE 0
 #define BLACK 1
 #define MINALPHA (-DBL_MAX)
 #define MAXBETA DBL_MAX
 #define TIMEOUT_THRESH (TIMEOUT-1)
-#define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
+
+// Miscellaneous macro functions
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
@@ -67,8 +73,9 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta);
 /* End function declarations */
 
-int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numMoves;
-double bestAlpha, tempAlpha, *scores;
+// Globals, especially those needed to be updated by recursion
+int R = -1, C = -1, lowestDepth, pruned, tempPruned, numMoves;
+double bestAlpha, *scores;
 int MAXDEPTH, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
 unsigned long long MAXBOARDS, numBoards;
 int *board, bestMove, *legalMoves;
@@ -83,7 +90,7 @@ int **moveList, **boardcopies;
  */
 
 int main(int argc, char **argv) {
- 	int res, i, *brdcpy;
+ 	int res, i, *brdcpy, move;
  	double bestScore;
 
  	// Make sure the input files are given
@@ -118,7 +125,7 @@ int main(int argc, char **argv) {
  		orderedMoveList[i].nCorners = orderedMoveList[i].nEdges = orderedMoveList[i].nOthers = 0;
  	}
 
- 	legalMoves = moveList[0];
+ 	legalMoves = moveList[0];	// Legacy code to avoid many code changes
 
  	// All compute valid first moves
  	numMoves = getLegalMoves(board, COLOR, legalMoves);
@@ -129,20 +136,37 @@ int main(int argc, char **argv) {
  		brdcpy = boardcopies[MAXDEPTH];
  		orderMoves(&orderedMoveList[MAXDEPTH], legalMoves, numMoves);
 
+ 		// Get the best initial alpha from all possible first moves
+ 		bestAlpha = MINALPHA;
  		for(i=0; i<numMoves; i++) {
  			applyMove(brdcpy, board, legalMoves[i], COLOR);
- 			scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, MINALPHA, MAXBETA);
+ 			scores[i] = masteralphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0);
+ 			bestAlpha = MAX(bestAlpha, scores[i]);
+ 		}
+
+ 		// Apply move ordering to first move as well to improve pruning
+ 		while(getNextMove(&orderedMoveList[MAXDEPTH], &move)) {
+ 			applyMove(brdcpy, board, move, COLOR);
+ 			for(i=0; i<numMoves; i++) if(move==legalMoves[i]) break;
+ 			scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, bestAlpha, MAXBETA);
  			if(scores[i]>bestScore){ bestScore = scores[i]; bestMove = legalMoves[i]; }
  			if(numBoards>=MAXBOARDS) break;
  		}
+
+ 		// for(i=0; i<numMoves; i++) {
+ 		// 	applyMove(brdcpy, board, legalMoves[i], COLOR);
+ 		// 	scores[i] = alphabeta(brdcpy, MAXDEPTH-1, !COLOR, 0, MINALPHA, MAXBETA);
+ 		// 	if(scores[i]>bestScore){ bestScore = scores[i]; bestMove = legalMoves[i]; }
+ 		// 	if(numBoards>=MAXBOARDS) break;
+ 		// }
  		free(scores);
  	} else {	// No legal move
 		bestMove = -1; numBoards = 1;
 	}
 
-	clock_gettime(CLOCK_REALTIME, &endtime);
+	clock_gettime(CLOCK_REALTIME, &endtime);	// Measure total time taken
 
-	printOutput(bestMove);
+	printOutput(bestMove);	// Output best move
 
  	// Cleanup
  	for(i=0; i<2; i++) free(moveList[i]);
@@ -397,7 +421,7 @@ double masteralphabeta(int brd[const], const int depth, const int color, const i
 	return score;
 }
 
-// This is actually done on slaves
+// The actual minimax algorithm
 double alphabeta(int brd[const], const int depth, const int color, const int passed, double alpha, double beta) {
 	int *tempMoves, *brdcpy, nMoves, i, isMaxPlayer = color==COLOR, move;
 	double res = isMaxPlayer? MINALPHA: MAXBETA, score;
