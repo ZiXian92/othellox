@@ -1,0 +1,5 @@
+Size: 6,6
+White: { d3,d4,d5 }
+Black: { b4,c3,c4 }
+Color: Black
+Timeout: 120

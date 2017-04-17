@@ -1,0 +1,5 @@
+Size: 8,8
+White: { a3,b4,c5,d2,d3,d5,d6,e3,e5,g5,h5,h6 }
+Black: { a5,b5,c3,c4,d4,e4,f3,f4,f5,f6,g3,g4 }
+Color: White
+Timeout: 120
