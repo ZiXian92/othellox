@@ -1,3 +1,8 @@
+/* othellox.c The main Othellox program
+ * Matric. No.: A0110781N
+ * Name: Qua Zi Xian
+ */
+
 #include <ctype.h>
 #include <float.h>
 #include <math.h>
@@ -36,20 +41,26 @@
 #define DIRMASK(move) ((move)&((1<<DIRBITS)-1))
 #define ENCODEMOVE(pos, dirs) (((pos)<<DIRBITS)|(dirs))
 
-#define MASTER_PID (numProcs-1)
+// Game-related constants
 #define WHITE 0
 #define BLACK 1
 #define MINALPHA (-DBL_MAX)
 #define MAXBETA DBL_MAX
-#define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
+
+// OpenMPI specific constants and macros
+#define MASTER_PID (numProcs-1)
 #define TIMEOUT_THRESH (TIMEOUT-1.5)
 #define BOARD_UPDATE_THRESH (MAXBOARDS/100)
+#define STARTMOVEIDX(sid, nMoves, nSlaves) ((sid)*(nMoves)/(nSlaves))
+
+// Miscellaneous macro functions
 #define MAX(a, b) ((a)>(b)? (a): (b))
 #define MIN(a, b) ((a)<(b)? (a): (b))
 
 // MPI Stuff
 #define NEW_ALPHA_TAG 0
 
+// Multilevel move queue
 struct OrderedMoves {
 	int *corners, *edges, *others, nCorners, nEdges, nOthers;
 };
@@ -74,18 +85,24 @@ void masterProcess();
 void slaveProcess(const int startMoveIdx, const int endMoveIdx);	// Processes legalMoves[startMoveIdx..(endMoveIdx-1)]
 /* End function declarations */
 
-int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, tempPruned, numMoves;
-double bestAlpha, tempAlpha, *scores, timetaken;
+// Eval aram constants
 int MAXDEPTH, CORNERVALUE, EDGEVALUE, COLOR, TIMEOUT;
+
+int R = -1, C = -1, pid, numProcs, lowestDepth, pruned, numMoves;
+double bestAlpha, tempAlpha, *scores, timetaken;
 unsigned long long MAXBOARDS, numBoards, totalBoards;
 int *board, bestMove, *legalMoves, shouldStop, dummy;
+struct OrderedMoves *orderedMoveList;
+int **moveList, **boardcopies;
+
+// Timing variables
 struct timespec starttime, endtime;
+
+// MPI communication stuff. Mainly for asynchronous communications.
 MPI_Request alphaReq, stopSigReq, boardCountReq, scoresReq, alphabcastReq, boardCountReq;
 int alphaReqFlag, stopSigReqFlag, boardCountReqFlag, scoresReqFlag, alphabcastReqFlag, boardCountReqFlag;
 MPI_Comm alphaChannel, stopChannel, alphabcastChannel, boardCountChannel;
-struct OrderedMoves *orderedMoveList;
 
-int **moveList, **boardcopies;
 
 /* Position labels in program, different from input
  * 210	[a3][b3][c3]
@@ -176,6 +193,7 @@ int isEdge(const int move) {
 }
 
 // Sort moves in terms of preferability
+// Make sure you really don't need this oMoves object before calling this.
 void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len) {
 	int i;
 	oMoves->nCorners = oMoves->nEdges = oMoves->nOthers = 0;
@@ -186,8 +204,11 @@ void orderMoves(struct OrderedMoves *oMoves, int moves[const], const int len) {
 	}
 }
 
-// Gets next move. Returns 1 if there is a move left and 0 otherwise.
+// Generator function to get next move from the ordered move queue.
+// Returns 1 if there is a move left and 0 otherwise.
 // If 1 is returned, move is set to be the next move.
+// If you need to use this move again later, store it in a local variable.
+// Pre-condition: oMoves is initialized with orderMoves() call.
 int getNextMove(struct OrderedMoves *oMoves, int *move) {
 	if(oMoves->nCorners) {
 		*move = oMoves->corners[--oMoves->nCorners];
@@ -423,7 +444,7 @@ void masterProcess() {
 			if(alphaReqFlag) {
 				if(tempAlpha>bestAlpha) {
 					bestAlpha = tempAlpha;
-					// MPI_Ibcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
+					MPI_Ibcast(&bestAlpha, 1, MPI_DOUBLE, MASTER_PID, alphabcastChannel, &alphabcastReq);
 				}
 				MPI_Irecv(&tempAlpha, 1, MPI_DOUBLE, MPI_ANY_SOURCE, NEW_ALPHA_TAG, alphaChannel, &alphaReq);
 			}
@@ -443,7 +464,6 @@ void masterProcess() {
 		
 		// Here, all scores should be ready for processing.
 		// Process scores to get best move(s)
-		// for(i=0; i<numMoves; i++) printf(" %lf", scores[i]); printf("\n");
 		bestScore = MINALPHA; bestMove = -1; legalMoves = moveList[0];
 		for(i=0; i<numMoves; i++) if(bestScore<scores[i]) { bestScore = scores[i]; bestMove = legalMoves[i]; }
 
